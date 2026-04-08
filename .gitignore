@@ -1,0 +1,10 @@
+backend/.venv/
+.venv/
+.env
+backend/.runtime/
+backend/data/*.db
+backend/uvicorn*.log
+backend/generated/
+frontend/dist/
+frontend/node_modules/
+agentic-workflow-playground-ui/node_modules/

@@ -1,0 +1,17 @@
+{
+  "owner": "horisony",
+  "slug": "snapdesign-rednote",
+  "displayName": "Snapdesign Rednote Clean",
+  "latest": {
+    "version": "2.0.1",
+    "publishedAt": 1773762989598,
+    "commit": "https://github.com/openclaw/skills/commit/b75214ea18a22e8ee41cce2674408d706007fd93"
+  },
+  "history": [
+    {
+      "version": "2.0.0",
+      "publishedAt": 1772757179688,
+      "commit": "https://github.com/openclaw/skills/commit/69231efcd8d6a8275d4e4cfb0ca343ca8f1f26b3"
+    }
+  ]
+}
