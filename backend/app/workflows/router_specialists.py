@@ -149,22 +149,6 @@ def run_router_specialists(
             stage = str(meta.get("stage") or "")
             tool_name = str(meta.get("tool_name") or "tool")
 
-            if stage == "tool_candidates":
-                available = int(meta.get("available_count") or 0)
-                selected = int(meta.get("selected_count") or 0)
-                push(
-                    trace,
-                    event(
-                        "state_updated",
-                        "Tool Matching",
-                        f"Matched {selected}/{available} tool(s) for this request.",
-                        node_id=agent.id,
-                        agent_id=agent.id,
-                        matching=meta.get("matching", []),
-                    ),
-                )
-                return
-
             if stage == "tool_started":
                 push(
                     trace,
@@ -207,12 +191,12 @@ def run_router_specialists(
                 return
 
             if stage == "tool_blocked":
-                reason = str(meta.get("reason") or "Tool execution blocked.")
+                reason = str(meta.get("reason") or "Tool execution failed; continuing without this tool.")
                 push(
                     trace,
                     event(
                         "state_updated",
-                        "Tool Blocked",
+                        "Tool Unavailable",
                         reason[:220],
                         node_id=agent.id,
                         agent_id=agent.id,

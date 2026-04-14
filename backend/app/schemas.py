@@ -11,8 +11,10 @@ WorkflowType = Literal[
     "planner_executor",
     "supervisor_dynamic",
     "single_agent_chat",
+    "peer_handoff",
 ]
 BuiltinCapability = Literal[
+    "filesystem",
     "fs_list",
     "fs_read",
     "fs_write",
@@ -127,7 +129,8 @@ class WorkflowTemplate(BaseModel):
 class WorkflowNode(BaseModel):
     id: str
     label: str
-    kind: Literal["start", "logic", "agent", "final", "end"]
+    kind: Literal["start", "logic", "agent", "final", "end", "group"]
+    parent_id: str | None = None
 
 
 class WorkflowEdge(BaseModel):

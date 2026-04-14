@@ -12,6 +12,40 @@ function resolveBackendHome() {
   return path.join(app.getPath("userData"), "backend");
 }
 
+function resolveBundledBackendResourceRoot() {
+  if (!app.isPackaged) {
+    return path.join(__dirname, "..", "backend");
+  }
+
+  const candidates = [
+    path.join(process.resourcesPath, "backend", "agent-playground-backend", "_internal", "backend"),
+    path.join(process.resourcesPath, "backend", "agent-playground-backend", "backend"),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
+}
+
+function resolveBundledSkillsSourceRoot() {
+  return path.join(resolveBundledBackendResourceRoot(), "skills");
+}
+
+function resolveBundledSeedDataRoot() {
+  return path.join(resolveBundledBackendResourceRoot(), "data");
+}
+
+function resolveUserDataSkillsRoot() {
+  return path.join(resolveBackendHome(), "skills");
+}
+
+function resolveUserDataDataRoot() {
+  return path.join(resolveBackendHome(), "data");
+}
+
+function resolveBundledRuntimeRoot() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "runtime")
+    : path.join(__dirname, ".artifacts", "runtime");
+}
+
 function resolveBackendPidFile() {
   return path.join(resolveBackendHome(), "backend.pid");
 }
@@ -25,15 +59,53 @@ function resolveBackendExecutable() {
 }
 
 function resolveBundledSkillsRoot() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, "backend", "agent-playground-backend", "backend", "skills")
-    : path.join(__dirname, "..", "backend", "skills");
+  return app.isPackaged ? resolveUserDataSkillsRoot() : resolveBundledSkillsSourceRoot();
 }
 
 function resolveFrontendEntry() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "renderer", "index.html")
     : path.join(__dirname, ".artifacts", "renderer", "index.html");
+}
+
+function copyDirectoryContents(sourceDir, targetDir, { overwrite = false } = {}) {
+  if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) {
+    return;
+  }
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryContents(sourcePath, targetPath, { overwrite });
+      continue;
+    }
+    if (!overwrite && fs.existsSync(targetPath)) {
+      continue;
+    }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(sourcePath, targetPath);
+  }
+}
+
+function seedBundledDesktopData() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  const bundledSkillsRoot = resolveBundledSkillsSourceRoot();
+  const userSkillsRoot = resolveUserDataSkillsRoot();
+  copyDirectoryContents(bundledSkillsRoot, userSkillsRoot, { overwrite: true });
+
+  const bundledDataRoot = resolveBundledSeedDataRoot();
+  const userDataRoot = resolveUserDataDataRoot();
+  const bundledDbPath = path.join(bundledDataRoot, "agent_playground.db");
+  const userDbPath = path.join(userDataRoot, "agent_playground.db");
+  if (fs.existsSync(bundledDbPath) && !fs.existsSync(userDbPath)) {
+    fs.mkdirSync(userDataRoot, { recursive: true });
+    fs.copyFileSync(bundledDbPath, userDbPath);
+  }
 }
 
 function waitForBackend(url, timeoutMs = 20000) {
@@ -68,6 +140,7 @@ async function startBackend() {
   const executablePath = resolveBackendExecutable();
   const userDataBackendHome = resolveBackendHome();
   fs.mkdirSync(userDataBackendHome, { recursive: true });
+  seedBundledDesktopData();
   const env = {
     ...process.env,
     AGENT_PLAYGROUND_HOST: "127.0.0.1",
@@ -75,6 +148,7 @@ async function startBackend() {
     AGENT_PLAYGROUND_APP_HOME: userDataBackendHome,
     AGENT_PLAYGROUND_ENV_PATH: path.join(app.getPath("userData"), ".env"),
     AGENT_PLAYGROUND_BUNDLED_SKILLS_ROOT: resolveBundledSkillsRoot(),
+    AGENT_PLAYGROUND_BUNDLED_RUNTIME_ROOT: resolveBundledRuntimeRoot(),
   };
 
   await stopBackendProcess();

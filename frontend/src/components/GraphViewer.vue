@@ -120,6 +120,51 @@ function layoutSupervisor(nodes, width, height) {
   return result;
 }
 
+function layoutPeerHandoff(nodes, width, height) {
+  const map = byId(nodes);
+  const result = [];
+  const groupNode = map.get("peer_pool");
+  const finalNode = map.get("finalize");
+  const endNode = map.get("end");
+  const agents = nodes.filter((node) => node.kind === "agent");
+
+  placeNode(result, map, "start", width * 0.5, height * 0.08);
+  placeNode(result, map, "first_owner_router", width * 0.5, height * 0.23);
+
+  const groupWidth = Math.min(width * 0.74, Math.max(340, width * 0.68));
+  const groupHeight = Math.min(height * 0.5, Math.max(210, height * 0.42));
+  if (groupNode) {
+    result.push({
+      ...groupNode,
+      x: width * 0.5,
+      y: height * (finalNode ? 0.54 : 0.6),
+      boxWidth: groupWidth,
+      boxHeight: groupHeight,
+    });
+  }
+
+  if (agents.length) {
+    const columns = Math.min(3, agents.length);
+    const rows = Math.ceil(agents.length / columns);
+    const innerLeft = width * 0.5 - groupWidth / 2 + 82;
+    const innerRight = width * 0.5 + groupWidth / 2 - 82;
+    const innerTop = (groupNode ? height * (finalNode ? 0.54 : 0.6) : height * 0.58) - groupHeight / 2 + 74;
+    const innerBottom = (groupNode ? height * (finalNode ? 0.54 : 0.6) : height * 0.58) + groupHeight / 2 - 58;
+
+    agents.forEach((node, index) => {
+      const column = columns === 1 ? 0 : index % columns;
+      const row = Math.floor(index / columns);
+      const x = columns === 1 ? width * 0.5 : innerLeft + ((innerRight - innerLeft) * column) / (columns - 1);
+      const y = rows === 1 ? (innerTop + innerBottom) / 2 : innerTop + ((innerBottom - innerTop) * row) / (rows - 1);
+      result.push({ ...node, x, y });
+    });
+  }
+
+  if (finalNode) placeNode(result, map, "finalize", width * 0.5, height * 0.86);
+  if (endNode) placeNode(result, map, "end", width * 0.5, height * 0.95);
+  return result;
+}
+
 function layoutFallback(nodes, width, height) {
   const startNode = nodes.find((node) => node.kind === "start");
   const endNode = nodes.find((node) => node.kind === "end");
@@ -159,6 +204,7 @@ const baseNodes = computed(() => {
 
   if (nodeIds.has("planner_core")) return layoutPlanner(nodes, width, height);
   if (nodeIds.has("supervisor_intake")) return layoutSupervisor(nodes, width, height);
+  if (nodeIds.has("peer_pool")) return layoutPeerHandoff(nodes, width, height);
   if (nodeIds.has("router")) return layoutRouter(nodes, width, height);
   return layoutFallback(nodes, width, height);
 });
@@ -200,18 +246,71 @@ const traversedEdgeKeys = computed(() => {
   return keys;
 });
 
-function connectionPath(fromNode, toNode) {
+const staticEdgeKeys = computed(() => {
+  const keys = new Set();
+  (props.graph?.edges || []).forEach((edge) => {
+    if (edge?.source && edge?.target) {
+      keys.add(`${edge.source}->${edge.target}`);
+    }
+  });
+  return keys;
+});
+
+function parentGroupId(nodeId) {
+  const node = nodeMap.value.get(nodeId);
+  return node?.parent_id || "";
+}
+
+function normalizeEdgeEndpoints(sourceId, targetId) {
+  let source = sourceId;
+  let target = targetId;
+  const sourceGroup = parentGroupId(sourceId);
+  const targetGroup = parentGroupId(targetId);
+
+  if (sourceGroup && (!targetGroup || targetGroup !== sourceGroup)) {
+    source = sourceGroup;
+  }
+  if (targetGroup && (!sourceGroup || sourceGroup !== targetGroup)) {
+    target = targetGroup;
+  }
+
+  return { source, target };
+}
+
+function boundaryPoint(node, otherNode) {
+  const dx = otherNode.x - node.x;
+  const dy = otherNode.y - node.y;
+
+  if (node.kind === "group") {
+    const halfWidth = (node.boxWidth || 320) / 2;
+    const halfHeight = (node.boxHeight || 220) / 2;
+    if (!dx && !dy) return { x: node.x, y: node.y };
+    const scaleX = dx === 0 ? Number.POSITIVE_INFINITY : halfWidth / Math.abs(dx);
+    const scaleY = dy === 0 ? Number.POSITIVE_INFINITY : halfHeight / Math.abs(dy);
+    const scale = Math.min(scaleX, scaleY);
+    return {
+      x: node.x + dx * scale,
+      y: node.y + dy * scale,
+    };
+  }
+
   const radius = 26;
+  const distance = Math.max(1, Math.hypot(dx, dy));
+  return {
+    x: node.x + (dx / distance) * radius,
+    y: node.y + (dy / distance) * radius,
+  };
+}
+
+function connectionPath(fromNode, toNode) {
   const dx = toNode.x - fromNode.x;
   const dy = toNode.y - fromNode.y;
-  const distance = Math.max(1, Math.hypot(dx, dy));
-  const unitX = dx / distance;
-  const unitY = dy / distance;
-
-  const startX = fromNode.x + unitX * radius;
-  const startY = fromNode.y + unitY * radius;
-  const endX = toNode.x - unitX * radius;
-  const endY = toNode.y - unitY * radius;
+  const startPoint = boundaryPoint(fromNode, toNode);
+  const endPoint = boundaryPoint(toNode, fromNode);
+  const startX = startPoint.x;
+  const startY = startPoint.y;
+  const endX = endPoint.x;
+  const endY = endPoint.y;
 
   const verticalCurve = Math.abs(dy) >= Math.abs(dx)
     ? Math.max(24, Math.abs(dy) * 0.4)
@@ -229,20 +328,44 @@ function connectionPath(fromNode, toNode) {
 }
 
 const graphEdges = computed(() => {
-  if (!props.graph?.edges?.length) return [];
-  return props.graph.edges
-    .map((edge) => {
-      const fromNode = nodeMap.value.get(edge.source);
-      const toNode = nodeMap.value.get(edge.target);
-      if (!fromNode || !toNode) return null;
-      const key = `${edge.source}->${edge.target}`;
-      return {
-        key,
-        d: connectionPath(fromNode, toNode),
-        active: traversedEdgeKeys.value.has(key),
-      };
-    })
-    .filter(Boolean);
+  const deduped = new Map();
+
+  function upsertEdge(sourceId, targetId, active, dynamic) {
+    const normalized = normalizeEdgeEndpoints(sourceId, targetId);
+    const fromNode = nodeMap.value.get(normalized.source);
+    const toNode = nodeMap.value.get(normalized.target);
+    if (!fromNode || !toNode) return;
+    const key = `${normalized.source}->${normalized.target}`;
+    const internal = !!(
+      fromNode.parent_id &&
+      toNode.parent_id &&
+      fromNode.parent_id === toNode.parent_id
+    );
+    const existing = deduped.get(key);
+    deduped.set(key, {
+      key,
+      d: connectionPath(fromNode, toNode),
+      active: active || existing?.active || false,
+      dynamic: dynamic || existing?.dynamic || false,
+      internal,
+    });
+  }
+
+  (props.graph?.edges || []).forEach((edge) => {
+    upsertEdge(edge.source, edge.target, traversedEdgeKeys.value.has(`${edge.source}->${edge.target}`), false);
+  });
+
+  traversedEdgeKeys.value.forEach((key) => {
+    if (staticEdgeKeys.value.has(key)) return;
+    const [source, target] = key.split("->");
+    upsertEdge(source, target, true, true);
+  });
+
+  const edges = [...deduped.values()];
+  return {
+    base: edges.filter((edge) => !edge.internal),
+    overlay: edges.filter((edge) => edge.internal),
+  };
 });
 
 function nodeIcon(kind) {
@@ -254,11 +377,32 @@ function nodeIcon(kind) {
 
 function nodeVisited(nodeId) {
   if (!props.trace.length) return false;
+  const node = nodeMap.value.get(nodeId);
+  if (node?.kind === "group") {
+    return graphNodes.value.some((item) => item.parent_id === nodeId && nodeVisited(item.id));
+  }
   return props.trace.some((event) => event?.payload?.node_id === nodeId || event?.payload?.next_node_id === nodeId);
 }
 
 function nodeCurrent(nodeId) {
+  const node = nodeMap.value.get(nodeId);
+  if (node?.kind === "group") {
+    return graphNodes.value.some((item) => item.parent_id === nodeId && nodeCurrent(item.id));
+  }
   return props.activeNodeId === nodeId;
+}
+
+function nodeStyle(node) {
+  const width = node.kind === "group" ? node.boxWidth || 320 : 42;
+  const height = node.kind === "group" ? node.boxHeight || 220 : 42;
+  return {
+    left: `${node.x}px`,
+    top: `${node.y}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+    marginLeft: `-${width / 2}px`,
+    marginTop: `-${height / 2}px`,
+  };
 }
 
 function resetOffsets() {
@@ -293,6 +437,7 @@ function onPointerUp() {
 }
 
 function onNodePointerDown(event, node) {
+  if (node.kind === "group") return;
   event.preventDefault();
   const rect = canvasRef.value?.getBoundingClientRect();
   if (!rect) return;
@@ -336,7 +481,7 @@ onBeforeUnmount(() => {
       <div v-if="!graph" class="trace-empty">{{ t("graph.empty") }}</div>
       <template v-else>
         <svg
-          class="graph-svg"
+          class="graph-svg graph-svg-base"
           :viewBox="`0 0 ${canvasSize.width || 560} ${canvasSize.height || 420}`"
           preserveAspectRatio="none"
         >
@@ -350,7 +495,7 @@ onBeforeUnmount(() => {
           </defs>
 
           <path
-            v-for="edge in graphEdges"
+            v-for="edge in graphEdges.base"
             :key="`base_${edge.key}`"
             :d="edge.d"
             fill="none"
@@ -360,7 +505,7 @@ onBeforeUnmount(() => {
             marker-end="url(#graphArrowBase)"
           />
           <path
-            v-for="edge in graphEdges.filter((item) => item.active)"
+            v-for="edge in graphEdges.base.filter((item) => item.active)"
             :key="`active_${edge.key}`"
             :d="edge.d"
             fill="none"
@@ -381,22 +526,57 @@ onBeforeUnmount(() => {
               active: nodeCurrent(node.id),
             },
           ]"
-          :style="{ left: `${node.x}px`, top: `${node.y}px` }"
+          :style="nodeStyle(node)"
           @pointerdown="onNodePointerDown($event, node)"
           @mouseenter="hoveredNodeId = node.id"
           @mouseleave="hoveredNodeId = ''"
         >
-          <div
-            v-if="hoveredNodeId === node.id"
-            class="graph-node-tooltip"
-          >
-            {{ node.label }}
-          </div>
+          <template v-if="node.kind === 'group'">
+            <div class="graph-group-head">
+              <strong>{{ node.label }}</strong>
+              <span class="panel-tag">Peer Mesh</span>
+            </div>
+            <div class="graph-group-copy">Specialists coordinate here. Actual handoff edges appear during runtime.</div>
+          </template>
+          <template v-else>
+            <div
+              v-if="hoveredNodeId === node.id"
+              class="graph-node-tooltip"
+            >
+              {{ node.label }}
+            </div>
 
-          <component v-if="nodeIcon(node.kind)" :is="nodeIcon(node.kind)" :size="15" />
-          <span v-else class="terminal-dot"></span>
-          <span v-if="nodeCurrent(node.id)" class="graph-node-ring"></span>
+            <component v-if="nodeIcon(node.kind)" :is="nodeIcon(node.kind)" :size="15" />
+            <span v-else class="terminal-dot"></span>
+            <span v-if="nodeCurrent(node.id)" class="graph-node-ring"></span>
+          </template>
         </div>
+
+        <svg
+          class="graph-svg graph-svg-overlay"
+          :viewBox="`0 0 ${canvasSize.width || 560} ${canvasSize.height || 420}`"
+          preserveAspectRatio="none"
+        >
+          <path
+            v-for="edge in graphEdges.overlay"
+            :key="`overlay_base_${edge.key}`"
+            :d="edge.d"
+            fill="none"
+            stroke="#cbd5e1"
+            stroke-width="2"
+            stroke-dasharray="4 4"
+            marker-end="url(#graphArrowBase)"
+          />
+          <path
+            v-for="edge in graphEdges.overlay.filter((item) => item.active)"
+            :key="`overlay_active_${edge.key}`"
+            :d="edge.d"
+            fill="none"
+            stroke="#3b82f6"
+            stroke-width="2.8"
+            marker-end="url(#graphArrowActive)"
+          />
+        </svg>
       </template>
     </div>
 

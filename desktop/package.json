@@ -31,6 +31,10 @@
       {
         "from": ".artifacts/backend",
         "to": "backend"
+      },
+      {
+        "from": ".artifacts/runtime",
+        "to": "runtime"
       }
     ],
     "mac": {

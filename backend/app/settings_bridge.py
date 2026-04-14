@@ -4,16 +4,35 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 PROJECT_ROOT_PATH = Path(__file__).resolve().parents[2]
 BACKEND_ROOT_PATH = Path(__file__).resolve().parents[1]
 ENV_PATH = PROJECT_ROOT_PATH / ".env"
 
-# Load local project .env only.
-if ENV_PATH.exists():
-    load_dotenv(ENV_PATH, override=False)
+
+def _load_bootstrap_env_files() -> None:
+    env_paths: list[Path] = []
+    app_env_path = str(os.getenv("AGENT_PLAYGROUND_ENV_PATH", "")).strip()
+    if app_env_path:
+        env_paths.append(Path(app_env_path))
+    env_paths.append(ENV_PATH)
+
+    seen: set[str] = set()
+    for env_path in env_paths:
+        try:
+            normalized = str(env_path.resolve())
+        except OSError:
+            normalized = str(env_path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if env_path.exists() and env_path.is_file():
+            load_dotenv(env_path, override=False)
+
+
+_load_bootstrap_env_files()
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -42,6 +61,10 @@ def _load_settings_values() -> dict[str, str | int]:
             "AGENT_PLAYGROUND_BUNDLED_SKILLS_ROOT",
             str(BACKEND_ROOT_PATH / "skills"),
         ),
+        "BUNDLED_RUNTIME_ROOT": _env_str(
+            "AGENT_PLAYGROUND_BUNDLED_RUNTIME_ROOT",
+            "",
+        ),
         "APP_ENV_PATH": _env_str(
             "AGENT_PLAYGROUND_ENV_PATH",
             str(ENV_PATH),
@@ -61,6 +84,7 @@ class Settings:
     BACKEND_ROOT: str
     APP_HOME: str
     BUNDLED_SKILLS_ROOT: str
+    BUNDLED_RUNTIME_ROOT: str
     APP_ENV_PATH: str
     OPENAI_API_KEY: str
     OPENAI_BASE_URL: str

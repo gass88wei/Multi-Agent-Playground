@@ -31,11 +31,12 @@ const messages = {
       title: "Settings",
       desc: "Configure model access for the desktop app runtime.",
       modelProfiles: "Model Profiles",
-      modelProfilesDesc: "Create multiple model configurations and activate one of them.",
+      modelProfilesDesc: "Create multiple model configurations. Save changes inside each profile editor.",
       addProfile: "Add Profile",
       active: "Active",
       setActive: "Set Active",
       editProfile: "Edit Profile",
+      closeEditor: "Close",
       profileName: "Profile Name",
       profileNamePlaceholder: "Profile name",
       providerPreset: "Provider Preset",
@@ -47,9 +48,13 @@ const messages = {
       modelPlaceholder: "gpt-4o-mini",
       envVars: "Environment Variables",
       envVarsDesc: "Add any extra env vars required by tools or providers.",
+      envVarsHint: "Press Enter or click save on a row to persist environment variables.",
       addEnvVar: "Add Variable",
       envKeyPlaceholder: "TAVILY_API_KEY",
       envValuePlaceholder: "value",
+      saveProfile: "Save Profile",
+      saveEnvVar: "Save",
+      envNoValue: "No value",
       envEmpty: "No extra environment variables configured.",
       storageLabel: "Env File",
       save: "Save Settings",
@@ -105,6 +110,7 @@ const messages = {
       template_planner_executor: "Planner Executor",
       template_supervisor_dynamic: "Supervisor Dynamic",
       template_single_agent_chat: "Single Agent Chat",
+      template_peer_handoff: "Peer Handoff",
       template_desc_router_specialists:
         "Router selects the best specialist for the user intent, then optionally passes through a finalizer.",
       template_desc_planner_executor:
@@ -113,6 +119,8 @@ const messages = {
         "Supervisor decides delegation at runtime, loops through workers as needed, and composes the final answer.",
       template_desc_single_agent_chat:
         "Direct chat with one selected agent using a minimal start -> agent -> end graph.",
+      template_desc_peer_handoff:
+        "Router selects the first owner, then specialists hand work to each other inside a shared collaboration zone.",
     },
     chat: {
       title: "Run",
@@ -179,11 +187,12 @@ const messages = {
       title: "设置",
       desc: "配置桌面应用运行时使用的大模型参数。",
       modelProfiles: "模型配置组",
-      modelProfilesDesc: "可以保存多组模型配置，并激活其中一个。",
+      modelProfilesDesc: "可以保存多组模型配置，并在每个编辑面板内单独保存。",
       addProfile: "新增配置组",
       active: "已激活",
       setActive: "设为激活",
       editProfile: "编辑配置组",
+      closeEditor: "收起",
       profileName: "配置组名称",
       profileNamePlaceholder: "输入配置组名称",
       providerPreset: "预设供应商",
@@ -195,9 +204,13 @@ const messages = {
       modelPlaceholder: "gpt-4o-mini",
       envVars: "环境变量",
       envVarsDesc: "可添加工具或其他 provider 需要的任意环境变量。",
+      envVarsHint: "每行可按回车或点击保存立即写入环境变量。",
       addEnvVar: "新增变量",
       envKeyPlaceholder: "TAVILY_API_KEY",
       envValuePlaceholder: "值",
+      saveProfile: "保存配置组",
+      saveEnvVar: "保存",
+      envNoValue: "未设置值",
       envEmpty: "当前没有额外环境变量。",
       storageLabel: "配置文件位置",
       save: "保存设置",
@@ -252,12 +265,18 @@ const messages = {
       template_router_specialists: "路由专家",
       template_planner_executor: "规划执行",
       template_supervisor_dynamic: "动态监督",
+      template_single_agent_chat: "单 Agent 对话",
+      template_peer_handoff: "同伴交接",
       template_desc_router_specialists:
         "先由 Router 选择最匹配的专家，再按需经过 Finalizer 统一收口。",
       template_desc_planner_executor:
         "先由 Planner 拆解任务，再分配给 Worker 执行，最后统一合成答复。",
       template_desc_supervisor_dynamic:
         "由 Supervisor 在运行中动态委派，按需循环调度 Worker 并收敛结果。",
+      template_desc_single_agent_chat:
+        "直接与一个选定的 Agent 对话，图结构最简。",
+      template_desc_peer_handoff:
+        "先选出第一责任人，再由专家之间在共享协作区内相互交接，直到任务收敛。",
     },
     chat: {
       title: "运行",
@@ -333,6 +352,7 @@ export function createUiI18n() {
       planner_executor: "Planner Executor",
       supervisor_dynamic: "Supervisor Dynamic",
       single_agent_chat: "Single Agent Chat",
+      peer_handoff: "Peer Handoff",
     };
     return fallbackLabels[type] || type;
   }
@@ -349,6 +369,8 @@ export function createUiI18n() {
         "Supervisor decides delegation at runtime, loops through workers as needed, and composes the final answer.",
       single_agent_chat:
         "Direct chat with one selected agent using a minimal start -> agent -> end graph.",
+      peer_handoff:
+        "Router selects the first owner, then specialists hand work to each other inside a shared collaboration zone.",
     };
     return fallbackDescriptions[type] || fallback;
   }

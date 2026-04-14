@@ -28,6 +28,7 @@ ToolTraceHook = Callable[[dict[str, Any]], None]
 
 class LLMGateway:
     _TOOL_BLOCKED_MARKER = "TOOL_EXECUTION_BLOCKED"
+    _TOOL_NO_FINAL_MARKER = "TOOL_EXECUTION_NO_FINAL_ANSWER"
     _INTENT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "search": (
             "search",
@@ -140,60 +141,6 @@ class LLMGateway:
         "生成",
         "内容",
     }
-    _INTENT_KEYWORDS_V2: dict[str, tuple[str, ...]] = {
-        "search": (
-            "search",
-            "find",
-            "lookup",
-            "news",
-            "web",
-            "google",
-            "bing",
-            "tavily",
-            "搜索",
-            "查找",
-            "检索",
-            "新闻",
-            "网页",
-            "最新",
-        ),
-        "rednote": (
-            "rednote",
-            "xiaohongshu",
-            "xhs",
-            "card",
-            "cards",
-            "carousel",
-            "html",
-            "小红书",
-            "卡片",
-            "图文",
-            "封面",
-            "排版",
-            "生成图片",
-        ),
-        "filesystem": (
-            "file",
-            "files",
-            "folder",
-            "directory",
-            "path",
-            "desktop",
-            "download",
-            "downloads",
-            "read file",
-            "list files",
-            "文件",
-            "文件夹",
-            "目录",
-            "路径",
-            "桌面",
-            "下载",
-            "读取文件",
-            "列出文件",
-        ),
-    }
-
     def __init__(self) -> None:
         self._prepared_node_dirs: set[str] = set()
         self._prepared_python_dirs: set[str] = set()
@@ -201,6 +148,8 @@ class LLMGateway:
         self._shell_deps_cache: dict[str, list[str]] = {}
         self._runtime_root = Path(settings.APP_HOME).resolve() / ".runtime"
         self._runtime_root.mkdir(parents=True, exist_ok=True)
+        bundled_runtime_root = str(getattr(settings, "BUNDLED_RUNTIME_ROOT", "") or "").strip()
+        self._bundled_runtime_root = Path(bundled_runtime_root).resolve() if bundled_runtime_root else None
         self.client = None
         self.api_configured = False
         self.refresh_client()
@@ -254,19 +203,35 @@ class LLMGateway:
         user_input: str,
         max_tasks: int = 4,
         force_multi: bool = False,
+        agents: Iterable[AgentDefinition] | None = None,
     ) -> tuple[list[str], str]:
         if not self.api_configured or self.client is None:
             return self._fallback_plan_tasks(user_input, max_tasks=max_tasks), "rule"
 
+        agent_list = list(agents or [])
         multi_hint = (
             "Prefer at least 2 tasks when the request includes multiple intents."
             if force_multi
             else "Use the minimum number of tasks needed."
         )
+        agent_catalog = ""
+        if agent_list:
+            catalog_lines = "\n".join(
+                f"- name={agent.name}; description={agent.description}"
+                for agent in agent_list
+            )
+            agent_catalog = (
+                "Available specialists:\n"
+                f"{catalog_lines}\n"
+                "Plan tasks so they map clearly onto the available specialists.\n"
+                "When the request reasonably spans product/design/engineering, reflect that in the task split.\n"
+                "Prefer task wording that makes the best specialist obvious.\n"
+            )
         prompt = (
             "You are a planning module.\n"
             f"Decompose the user request into at most {max_tasks} executable tasks.\n"
             f"{multi_hint}\n"
+            f"{agent_catalog}"
             "Return ONLY a JSON array of strings.\n"
             f"User request: {user_input}"
         )
@@ -352,13 +317,12 @@ class LLMGateway:
         user_input: str,
         history: list[dict[str, str]] | None = None,
         trace_hook: ToolTraceHook | None = None,
+        final_response_instruction: str | None = None,
+        response_contract: str = "freeform",
     ) -> str:
         system_prompt = self._compose_system_prompt(agent)
         enabled_skills = store.get_skills_by_ids(agent.skill_ids)
-        executable_tools = [
-            *self._get_builtin_tools(agent),
-            *self._get_executable_skills(enabled_skills),
-        ]
+        executable_tools = self._get_executable_skills(enabled_skills)
         if not self.api_configured or self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
         return self._run_agent_with_tools(
@@ -368,11 +332,24 @@ class LLMGateway:
             executable_tools=executable_tools,
             history=history,
             trace_hook=trace_hook,
+            final_response_instruction=final_response_instruction,
+            response_contract=response_contract,
         )
+
+    def _normalized_builtin_capabilities(self, agent: AgentDefinition) -> set[str]:
+        raw = {
+            str(item).strip()
+            for item in (getattr(agent, "builtin_capabilities", None) or [])
+            if str(item).strip()
+        }
+        normalized: set[str] = set()
+        if raw & {"filesystem", "fs_list", "fs_read", "fs_write"}:
+            normalized.add("filesystem")
+        return normalized
 
     def finalize(self, user_input: str, agent: AgentDefinition, specialist_answer: str) -> str:
         if self._is_tool_blocked_response(specialist_answer):
-            return specialist_answer
+            return self._format_tool_runtime_issue(specialist_answer, agent)
         if not self.api_configured or self.client is None:
             return (
                 f"系统已将请求路由给 {agent.name}。\n"
@@ -397,8 +374,19 @@ class LLMGateway:
         normalized = str(text or "")
         return (
             self._TOOL_BLOCKED_MARKER in normalized
+            or self._TOOL_NO_FINAL_MARKER in normalized
             or "response generation is blocked to avoid fabricated output" in normalized
         )
+
+    def _format_tool_runtime_issue(self, text: str, agent: AgentDefinition) -> str:
+        normalized = str(text or "").strip()
+        if self._TOOL_NO_FINAL_MARKER in normalized or "did not produce a final answer" in normalized:
+            return (
+                f"{agent.name} 已完成工具调用，但执行器没有收敛出最终答案。"
+                "这不是工具本身失败，而是工具后的总结阶段没有正常完成。"
+                "本轮结果不应视为任务完成，应该继续调度、重试，或让其他节点接管。"
+            )
+        return normalized.replace(self._TOOL_BLOCKED_MARKER, "").strip()
 
     def _fallback_route(
         self,
@@ -444,13 +432,33 @@ class LLMGateway:
             )
 
         if skills:
-            skill_lines = "\n".join(
-                f"- {skill.name}: {skill.instruction}"
-                for skill in skills
-            )
+            skill_lines: list[str] = [
+                "Available skills:",
+                "Review the skill descriptions below before replying.",
+                "If exactly one skill clearly matches the task, follow that skill's guidance.",
+                "If multiple skills could apply, choose the most specific one.",
+                "Do not assume every listed skill is relevant.",
+                "",
+                "<available_skills>",
+            ]
+            for skill in skills:
+                location = str(skill.local_path or "").strip()
+                if location:
+                    location = str((Path(location) / "SKILL.md").resolve())
+                else:
+                    location = skill.id
+                skill_lines.extend(
+                    [
+                        "  <skill>",
+                        f"    <name>{skill.name}</name>",
+                        f"    <description>{skill.description}</description>",
+                        f"    <location>{location}</location>",
+                        "  </skill>",
+                    ]
+                )
+            skill_lines.append("</available_skills>")
             sections.append(
-                "Enabled skills:\n"
-                f"{skill_lines}"
+                "\n".join(skill_lines)
             )
 
         return "\n\n".join(section for section in sections if section)
@@ -659,6 +667,47 @@ class LLMGateway:
                 return base / Path(tail)
         return None
 
+    def _root_label_aliases(self, root: Path) -> set[str]:
+        aliases = {str(root.name or "").strip().lower()}
+        normalized_root = root.resolve()
+        folder_alias_map: dict[str, tuple[str, ...]] = {
+            "desktop": ("desktop", "桌面", "我的桌面"),
+            "downloads": ("downloads", "download", "下载"),
+            "documents": ("documents", "document", "docs", "文档"),
+            "pictures": ("pictures", "picture", "images", "photos", "图片", "照片"),
+            "videos": ("videos", "video", "影片", "视频"),
+            "music": ("music", "audio", "歌曲", "音乐"),
+        }
+        for canonical, labels in folder_alias_map.items():
+            for candidate in self._known_folder_candidates(canonical):
+                try:
+                    if candidate.resolve() == normalized_root:
+                        aliases.update(label.lower() for label in labels)
+                        break
+                except OSError:
+                    continue
+        aliases.discard("")
+        return aliases
+
+    def _resolve_root_label_target(self, raw_path: str) -> Path | None:
+        normalized = str(raw_path or "").strip().replace("\\", "/")
+        if not normalized or normalized.startswith("/") or normalized.startswith("~"):
+            return None
+
+        head, _, tail = normalized.partition("/")
+        lowered_head = head.strip().lower()
+        if not lowered_head:
+            return None
+
+        for root in self._allowed_filesystem_roots():
+            aliases = self._root_label_aliases(root)
+            if lowered_head not in aliases:
+                continue
+            if tail.strip():
+                return root / Path(tail)
+            return root
+        return None
+
     def _workspace_relative(self, target: Path) -> str:
         resolved = target.resolve()
         workspace_root = self._workspace_root()
@@ -679,7 +728,8 @@ class LLMGateway:
             raise ValueError("Path is required.")
 
         alias_target = self._resolve_special_path_alias(path_text)
-        candidate = alias_target if alias_target is not None else Path(path_text).expanduser()
+        root_label_target = None if alias_target is not None else self._resolve_root_label_target(path_text)
+        candidate = alias_target if alias_target is not None else root_label_target if root_label_target is not None else Path(path_text).expanduser()
         if not candidate.is_absolute():
             candidate = self._workspace_root() / candidate
         resolved = candidate.resolve()
@@ -876,7 +926,7 @@ class LLMGateway:
             parsed = min(maximum, parsed)
         return parsed
 
-    def _builtin_filesystem_tools(self) -> list[dict[str, Any]]:
+    def _builtin_filesystem_tools(self, agent: AgentDefinition) -> list[dict[str, Any]]:
         root = self._workspace_root()
         base = {
             "skill_id": "builtin_filesystem",
@@ -888,7 +938,27 @@ class LLMGateway:
             "execution_mode": "builtin_fs",
             "command": [],
         }
-        return [
+        capability_map = {
+            "filesystem": {
+                "fs_list_roots",
+                "fs_search_paths",
+                "fs_list_directory",
+                "fs_read_file",
+                "fs_write_file",
+                "fs_append_file",
+                "fs_make_directory",
+                "fs_delete_path",
+                "fs_move_path",
+            },
+        }
+        enabled_capabilities = self._normalized_builtin_capabilities(agent)
+        allowed_names = {
+            tool_name
+            for capability in enabled_capabilities
+            for tool_name in capability_map.get(capability, set())
+        }
+
+        all_tools = [
             {
                 **base,
                 "name": "fs_list_roots",
@@ -1012,6 +1082,7 @@ class LLMGateway:
                 },
             },
         ]
+        return [tool for tool in all_tools if str(tool.get("name") or "") in allowed_names]
 
     def _execute_builtin_filesystem_tool(
         self,
@@ -1060,7 +1131,7 @@ class LLMGateway:
                 lines = []
                 for item in hits:
                     marker = "D" if item.is_dir() else "F"
-                    lines.append(f"[{marker}] {self._workspace_relative(item)}")
+                    lines.append(f"[{marker}] {self._workspace_relative(item)} | abs={str(item.resolve())}")
                 body = "\n".join(lines) if lines else "(no matches)"
                 tool_meta["ok"] = True
                 return f"Search query: {query}\nMatches: {len(hits)}\n{body}", tool_meta
@@ -1103,14 +1174,15 @@ class LLMGateway:
                         continue
                     label = "D" if entry.is_dir() else "F"
                     rel = self._workspace_relative(entry)
+                    absolute = str(entry.resolve())
                     if entry.is_file():
                         try:
                             size = entry.stat().st_size
                         except OSError:
                             size = 0
-                        lines.append(f"[{label}] {rel} ({size} bytes)")
+                        lines.append(f"[{label}] {rel} ({size} bytes) | abs={absolute}")
                     else:
-                        lines.append(f"[{label}] {rel}")
+                        lines.append(f"[{label}] {rel} | abs={absolute}")
 
                 truncated = total_seen > len(lines)
                 root_display = self._workspace_relative(target)
@@ -1125,7 +1197,12 @@ class LLMGateway:
                 return message[:20000], tool_meta
 
             if function_name == "fs_read_file":
-                target = self._resolve_workspace_target(args.get("path"))
+                raw_path = args.get("path")
+                target = self._resolve_workspace_target(raw_path)
+                if not target.exists():
+                    guessed = self._guess_existing_target(raw_path, expect_dir=False)
+                    if guessed is not None:
+                        target = guessed
                 if not target.exists():
                     raise ValueError(f"File not found: {self._workspace_relative(target)}")
                 if not target.is_file():
@@ -1226,8 +1303,10 @@ class LLMGateway:
             if function_name == "fs_make_directory":
                 target = self._resolve_workspace_target(args.get("path"))
                 target.mkdir(parents=True, exist_ok=True)
+                rel = self._workspace_relative(target)
+                tool_meta["generated_files"] = [rel]
                 tool_meta["ok"] = True
-                return f"Directory ready: {self._workspace_relative(target)}", tool_meta
+                return f"Directory ready: {rel}", tool_meta
 
             if function_name == "fs_delete_path":
                 target = self._resolve_workspace_target(args.get("path"))
@@ -1279,111 +1358,15 @@ class LLMGateway:
         except Exception as error:  # noqa: BLE001
             message = str(error).strip() or f"Builtin tool '{function_name}' failed."
             tool_meta["error"] = message
+            tool_meta["error_code"] = self._tool_error_code(message)
+            tool_meta["recoverable"] = self._is_recoverable_tool_error(
+                function_name=function_name,
+                tool_meta=tool_meta,
+            )
             return message[:1200], tool_meta
 
     def _get_builtin_tools(self, agent: AgentDefinition) -> list[dict[str, Any]]:
-        capabilities = {
-            str(item).strip()
-            for item in (getattr(agent, "builtin_capabilities", None) or [])
-            if str(item).strip()
-        }
-        tools: list[dict[str, Any]] = []
-
-        if "fs_list" in capabilities:
-            tools.append(
-                {
-                    "tool_kind": "builtin",
-                    "builtin_capability": "fs_list",
-                    "name": "builtin_list_directory",
-                    "skill_id": None,
-                    "skill_name": "Built-in Filesystem",
-                    "description": (
-                        "List files and folders in a directory path. "
-                        "用于查看目录、桌面、下载目录中的文件和文件夹。"
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Directory path to inspect.",
-                            },
-                            "include_hidden": {
-                                "type": "boolean",
-                                "description": "Whether to include hidden files.",
-                            },
-                            "recursive": {
-                                "type": "boolean",
-                                "description": "Whether to traverse subdirectories recursively.",
-                            },
-                            "max_entries": {
-                                "type": "integer",
-                                "description": "Maximum number of entries to return.",
-                            },
-                        },
-                    },
-                }
-            )
-
-        if "fs_read" in capabilities:
-            tools.append(
-                {
-                    "tool_kind": "builtin",
-                    "builtin_capability": "fs_read",
-                    "name": "builtin_read_file",
-                    "skill_id": None,
-                    "skill_name": "Built-in Filesystem",
-                    "description": (
-                        "Read a text file from a path. "
-                        "用于读取本地文本文件内容。"
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path to read.",
-                            },
-                            "max_chars": {
-                                "type": "integer",
-                                "description": "Maximum number of characters to return.",
-                            },
-                        },
-                        "required": ["path"],
-                    },
-                }
-            )
-
-        if "fs_write" in capabilities:
-            tools.append(
-                {
-                    "tool_kind": "builtin",
-                    "builtin_capability": "fs_write",
-                    "name": "builtin_write_file",
-                    "skill_id": None,
-                    "skill_name": "Built-in Filesystem",
-                    "description": (
-                        "Write text content to a file path. "
-                        "用于创建或覆盖本地文本文件。"
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Target file path.",
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Text content to write.",
-                            },
-                        },
-                        "required": ["path", "content"],
-                    },
-                }
-            )
-
-        return tools
+        return []
 
     def build_skill_preflight(self, skill: Any) -> dict[str, Any]:
         skill_id = str(getattr(skill, "id", "") or "").strip()
@@ -1454,17 +1437,12 @@ class LLMGateway:
 
         missing_launchers = self._missing_command_launchers(command)
         if missing_launchers:
-            joined = ", ".join(missing_launchers)
             base.update(
                 {
                     "ready": False,
                     "status": "missing_launcher",
                     "missing_launchers": missing_launchers,
-                    "message": (
-                        f"Missing command launcher(s): {joined}. "
-                        "Install missing runtime dependencies manually (e.g., jq), "
-                        "or run backend/scripts/bootstrap-runtime.sh on Unix."
-                    ),
+                    "message": self._missing_launcher_message(missing_launchers),
                 }
             )
             return base
@@ -1747,6 +1725,9 @@ class LLMGateway:
 
         path_parts: list[str] = []
         current_path = str(runtime_env.get("PATH") or "")
+        bundled_node_bin = self._bundled_node_bin_dir()
+        if bundled_node_bin and str(bundled_node_bin) not in current_path:
+            path_parts.append(str(bundled_node_bin))
         if str(bin_dir) not in current_path:
             path_parts.append(str(bin_dir))
         if str(tool_dir) not in current_path:
@@ -1895,6 +1876,41 @@ class LLMGateway:
         basename = Path(lowered).name
         return basename in {"node", "node.exe"}
 
+    def _bundled_node_root(self) -> Path | None:
+        if self._bundled_runtime_root is None:
+            return None
+        candidate = self._bundled_runtime_root / "node"
+        return candidate if candidate.exists() and candidate.is_dir() else None
+
+    def _bundled_node_bin_dir(self) -> Path | None:
+        root = self._bundled_node_root()
+        if root is None:
+            return None
+        candidate = root / "bin"
+        return candidate if candidate.exists() and candidate.is_dir() else None
+
+    def _bundled_node_binary(self) -> str | None:
+        bin_dir = self._bundled_node_bin_dir()
+        if bin_dir is None:
+            return None
+        executable_name = "node.exe" if os.name == "nt" else "node"
+        candidate = bin_dir / executable_name
+        return str(candidate) if candidate.exists() and candidate.is_file() else None
+
+    def _bundled_npm_cli(self) -> str | None:
+        root = self._bundled_node_root()
+        if root is None:
+            return None
+        candidate = root / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        return str(candidate) if candidate.exists() and candidate.is_file() else None
+
+    def _missing_launcher_message(self, launchers: list[str]) -> str:
+        normalized = {Path(str(item or "").strip().lower()).name for item in launchers if str(item or "").strip()}
+        if normalized and normalized.issubset({"node", "node.exe"}):
+            return "This skill requires the Node.js runtime, but it is unavailable in the current desktop build."
+        joined = ", ".join(launchers)
+        return f"This skill requires runtime launcher(s) that are unavailable: {joined}."
+
     def _resolve_shell_launcher(self) -> str | None:
         if os.name == "nt":
             preferred = [
@@ -1928,6 +1944,11 @@ class LLMGateway:
         resolved = list(command)
         first = str(resolved[0]).strip()
         first_base = Path(first.lower()).name
+        if self._is_node_launcher(first):
+            bundled_node = self._bundled_node_binary()
+            if bundled_node:
+                resolved[0] = bundled_node
+                return resolved
         if first_base in {"bash", "bash.exe", "sh", "sh.exe"}:
             shell_bin = self._resolve_shell_launcher()
             if shell_bin:
@@ -2250,94 +2271,6 @@ class LLMGateway:
             )
         )
 
-    def _infer_intent_labels(self, text: str) -> set[str]:
-        lowered = text.lower()
-        labels: set[str] = set()
-        for label, keywords in self._INTENT_KEYWORDS_V2.items():
-            if any(keyword in lowered for keyword in keywords):
-                labels.add(label)
-        if self._looks_like_filesystem_intent(text):
-            labels.add("filesystem")
-        return labels
-
-    def _score_tool_relevance(
-        self,
-        *,
-        user_input: str,
-        tool: dict[str, Any],
-    ) -> tuple[int, dict[str, Any]]:
-        tool_text = " ".join(
-            str(part or "")
-            for part in (
-                tool.get("name"),
-                tool.get("skill_name"),
-                tool.get("description"),
-            )
-        )
-        user_labels = self._infer_intent_labels(user_input)
-        tool_labels = self._infer_intent_labels(tool_text)
-        label_overlap = sorted(user_labels.intersection(tool_labels))
-
-        user_tokens = self._extract_query_tokens(user_input)
-        tool_tokens = self._extract_query_tokens(tool_text)
-        lexical_overlap = sorted(user_tokens.intersection(tool_tokens))
-
-        score = 0
-        score += len(label_overlap) * 10
-        score += min(8, len(lexical_overlap))
-        if user_labels and tool_labels and not label_overlap:
-            score -= 12
-        if not label_overlap and len(lexical_overlap) < 2:
-            score -= 4
-        if str(tool.get("name") or "").lower() in user_input.lower():
-            score += 2
-
-        debug = {
-            "tool_name": tool.get("name"),
-            "skill_name": tool.get("skill_name"),
-            "score": score,
-            "label_overlap": label_overlap,
-            "tool_labels": sorted(tool_labels),
-            "lexical_overlap": lexical_overlap[:10],
-        }
-        return score, debug
-
-    def _select_relevant_tools(
-        self,
-        user_input: str,
-        executable_skills: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        scored: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
-        for tool in executable_skills:
-            score, debug = self._score_tool_relevance(user_input=user_input, tool=tool)
-            scored.append((score, tool, debug))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        selected_builtins = [
-            item
-            for _, item, _ in scored
-            if str(item.get("tool_kind") or "") == "builtin"
-        ]
-        selected_scored = [
-            item
-            for score, item, _ in scored
-            if str(item.get("tool_kind") or "") != "builtin" and score > 0
-        ]
-        selected = [*selected_builtins, *selected_scored[: max(0, 8 - len(selected_builtins))]]
-        if self._looks_like_filesystem_intent(user_input):
-            builtin_fs = [
-                item
-                for _, item, _ in scored
-                if str(item.get("execution_mode") or "") == "builtin_fs"
-            ]
-            for item in builtin_fs:
-                if len(selected) >= 8:
-                    break
-                if item not in selected:
-                    selected.append(item)
-        debug_rows = [debug for _, _, debug in scored]
-        return selected, debug_rows
-
     def _build_argv_command(
         self,
         *,
@@ -2482,6 +2415,10 @@ class LLMGateway:
         return max(0.1, min(value, 3.0))
 
     def _resolve_npm_command(self) -> list[str] | None:
+        bundled_node = self._bundled_node_binary()
+        bundled_npm_cli = self._bundled_npm_cli()
+        if bundled_node and bundled_npm_cli:
+            return [bundled_node, bundled_npm_cli]
         npm_cmd = shutil.which("npm.cmd") or shutil.which("npm")
         if not npm_cmd:
             return None
@@ -2538,25 +2475,23 @@ class LLMGateway:
         executable_tools: list[dict[str, Any]],
         history: list[dict[str, str]] | None = None,
         trace_hook: ToolTraceHook | None = None,
+        final_response_instruction: str | None = None,
+        response_contract: str = "freeform",
     ) -> str:
         if self.client is None:
             return self._fallback_agent_response(agent, user_input, system_prompt)
 
-        builtin_tools = self._builtin_filesystem_tools()
+        builtin_tools = self._builtin_filesystem_tools(agent)
         available_tools = [*executable_tools, *builtin_tools]
-        filtered_skills, matching_debug = self._select_relevant_tools(user_input, available_tools)
-        if trace_hook is not None:
-            trace_hook(
-                {
-                    "stage": "tool_candidates",
-                    "agent_id": agent.id,
-                    "agent_name": agent.name,
-                    "available_count": len(available_tools),
-                    "skill_tool_count": len(executable_tools),
-                    "builtin_tool_count": len(builtin_tools),
-                    "selected_count": len(filtered_skills),
-                    "matching": matching_debug,
-                }
+        filtered_skills = available_tools
+        successful_tool_records: list[dict[str, Any]] = []
+        had_failed_tools = False
+
+        if self._looks_like_filesystem_intent(user_input) and not filtered_skills:
+            return (
+                f"{agent.name} 未启用可用的文件系统工具，无法直接读取、搜索或修改本地文件/目录。"
+                "请为该 agent 绑定 `filesystem` capability，"
+                "或切换到具备这些能力的 agent。"
             )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -2574,46 +2509,55 @@ class LLMGateway:
             return (response.choices[0].message.content or "").strip()
 
         tool_registry = {item["name"]: item for item in filtered_skills}
-        tools_payload = [
-            {
-                "type": "function",
-                "function": {
-                    "name": item["name"],
-                    "description": item["description"] or f"Execute skill {item['skill_name']}",
-                    "parameters": item["input_schema"],
-                },
-            }
-            for item in filtered_skills
-        ]
 
-        has_non_builtin_tools = any(
-            str(item.get("tool_kind") or "") != "builtin"
-            for item in filtered_skills
-        )
-        must_call_tool = has_non_builtin_tools or self._looks_like_filesystem_intent(user_input)
+        def build_tools_payload() -> list[dict[str, Any]]:
+            return [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": item["name"],
+                        "description": item["description"] or f"Execute skill {item['skill_name']}",
+                        "parameters": item["input_schema"],
+                    },
+                }
+                for item in tool_registry.values()
+            ]
+
+        tools_payload = build_tools_payload()
 
         for _ in range(4):
+            request_args: dict[str, Any] = {
+                "model": agent.model or settings.OPENAI_MODEL,
+                "temperature": 0.2,
+                "messages": messages,
+            }
+            if tools_payload:
+                request_args["tools"] = tools_payload
+                request_args["tool_choice"] = "auto"
+
             response = self.client.chat.completions.create(
-                model=agent.model or settings.OPENAI_MODEL,
-                temperature=0.2,
-                messages=messages,
-                tools=tools_payload,
-                tool_choice="required" if must_call_tool else "auto",
+                **request_args,
             )
             message = response.choices[0].message
             tool_calls = list(message.tool_calls or [])
 
             if not tool_calls:
-                if must_call_tool:
-                    return (
-                        "Tool invocation was required but no tool was called. "
-                        "Response is blocked to avoid non-tool fallback."
-                    )
                 content = (message.content or "").strip()
                 if content:
-                    return content
+                    invalid_reason = (
+                        self._answer_conflicts_with_tool_evidence(
+                            content,
+                            tool_records=successful_tool_records,
+                            had_failed_tools=had_failed_tools,
+                        )
+                        if response_contract == "action_json"
+                        else ""
+                    )
+                    if not invalid_reason:
+                        return content
+                    messages.append({"role": "assistant", "content": content})
+                    break
                 break
-            must_call_tool = False
 
             messages.append(
                 {
@@ -2709,6 +2653,7 @@ class LLMGateway:
                         }
                     )
                 if not bool(tool_meta.get("ok")):
+                    had_failed_tools = True
                     blocked_message = self._build_tool_blocked_message(
                         function_name=function_name,
                         tool_result=tool_result,
@@ -2723,6 +2668,8 @@ class LLMGateway:
                                 "tool_call_id": call.id,
                                 "tool_name": function_name,
                                 "reason": tool_meta.get("error") or tool_result,
+                                "error_code": tool_meta.get("error_code"),
+                                "recoverable": tool_meta.get("recoverable"),
                                 "skill_id": tool_meta.get("skill_id"),
                                 "skill_name": tool_meta.get("skill_name"),
                                 "attempt_count": tool_meta.get("attempt_count"),
@@ -2737,7 +2684,17 @@ class LLMGateway:
                                 "auto_provision_errors": tool_meta.get("auto_provision_errors", []),
                             }
                         )
-                    return blocked_message
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": blocked_message,
+                        }
+                    )
+                    if not self._is_recoverable_tool_error(function_name=function_name, tool_meta=tool_meta):
+                        tool_registry.pop(function_name, None)
+                        tools_payload = build_tools_payload()
+                    continue
                 messages.append(
                     {
                         "role": "tool",
@@ -2745,8 +2702,217 @@ class LLMGateway:
                         "content": tool_result,
                     }
                 )
+                successful_tool_records.append(
+                    {
+                        "name": function_name,
+                        "summary": tool_result[:240],
+                        "generated_files": list(tool_meta.get("generated_files") or []),
+                    }
+                )
 
-        return self._fallback_agent_response(agent, user_input, system_prompt)
+        recovered_answer = self._force_final_tool_answer(
+            agent=agent,
+            messages=messages,
+            tool_records=successful_tool_records,
+            invalid_reason=(
+                self._answer_conflicts_with_tool_evidence(
+                    str(messages[-1].get("content") or "") if messages else "",
+                    tool_records=successful_tool_records,
+                    had_failed_tools=had_failed_tools,
+                )
+                if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant"
+                else ""
+            ),
+            final_response_instruction=final_response_instruction,
+        )
+        if recovered_answer:
+            invalid_reason = (
+                self._answer_conflicts_with_tool_evidence(
+                    recovered_answer,
+                    tool_records=successful_tool_records,
+                    had_failed_tools=had_failed_tools,
+                )
+                if response_contract == "action_json"
+                else ""
+            )
+            if not invalid_reason:
+                return recovered_answer
+            messages.append({"role": "assistant", "content": recovered_answer})
+
+        selected_names = ", ".join(
+            str(item.get("name") or "")
+            for item in filtered_skills
+            if str(item.get("name") or "").strip()
+        ) or "(none)"
+        if response_contract == "action_json":
+            issue_message = self._build_tool_runtime_issue_message(
+                selected_names=selected_names,
+                tool_records=successful_tool_records,
+                had_failed_tools=had_failed_tools,
+            )
+            return json.dumps(
+                {
+                    "action": "block",
+                    "message": issue_message,
+                },
+                ensure_ascii=False,
+            )
+        issue_message = self._build_tool_runtime_issue_message(
+            selected_names=selected_names,
+            tool_records=successful_tool_records,
+            had_failed_tools=had_failed_tools,
+        )
+        return issue_message
+
+    def _force_final_tool_answer(
+        self,
+        *,
+        agent: AgentDefinition,
+        messages: list[dict[str, Any]],
+        tool_records: list[dict[str, Any]] | None = None,
+        invalid_reason: str = "",
+        final_response_instruction: str | None = None,
+    ) -> str:
+        try:
+            evidence_summary = self._tool_evidence_summary(tool_records or [])
+            response_contract = str(final_response_instruction or "").strip()
+            if not response_contract:
+                response_contract = (
+                    "Produce the final answer now. "
+                    "Do not call more tools. If the task is not complete, clearly state what remains."
+                )
+            recovery_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Using the tool results already collected above, respond now.\n"
+                        f"{response_contract}\n\n"
+                        "You must only claim filesystem changes that are explicitly verified by successful tool results.\n"
+                        f"Verified tool evidence:\n{evidence_summary}\n"
+                        + (
+                            f"\nPrevious draft was rejected because: {invalid_reason}\n"
+                            if invalid_reason.strip()
+                            else ""
+                        )
+                    ),
+                },
+            ]
+            response = self.client.chat.completions.create(
+                model=agent.model or settings.OPENAI_MODEL,
+                temperature=0.1,
+                messages=recovery_messages,
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+
+        return (response.choices[0].message.content or "").strip()
+
+    def _build_tool_runtime_issue_message(
+        self,
+        *,
+        selected_names: str,
+        tool_records: list[dict[str, Any]],
+        had_failed_tools: bool,
+    ) -> str:
+        if had_failed_tools:
+            return (
+                f"{self._TOOL_NO_FINAL_MARKER}\n"
+                "Tool execution encountered recoverable issues and did not converge to a final answer. "
+                f"Selected tools: {selected_names}. "
+                "This result should not be treated as task completion."
+            )
+        evidence_summary = self._tool_evidence_summary(tool_records)
+        return (
+            f"{self._TOOL_NO_FINAL_MARKER}\n"
+            "Tool-enabled execution completed, but the model did not produce a trustworthy final answer. "
+            f"Selected tools: {selected_names}. "
+            f"Verified evidence:\n{evidence_summary}\n"
+            "This result should be retried, continued by the planner, or handed to another step."
+        )
+
+    def _tool_evidence_summary(self, tool_records: list[dict[str, Any]]) -> str:
+        if not tool_records:
+            return "- No successful tool evidence recorded."
+
+        lines: list[str] = []
+        for item in tool_records[-12:]:
+            name = str(item.get("name") or "").strip() or "tool"
+            summary = str(item.get("summary") or "").strip() or "(no summary)"
+            lines.append(f"- {name}: {summary}")
+        return "\n".join(lines)
+
+    def _tool_evidence_flags(self, tool_records: list[dict[str, Any]]) -> dict[str, bool]:
+        names = {str(item.get("name") or "").strip() for item in tool_records}
+        return {
+            "made_directory": "fs_make_directory" in names,
+            "wrote_file": bool({"fs_write_file", "fs_append_file"} & names),
+            "moved_path": "fs_move_path" in names,
+            "deleted_path": "fs_delete_path" in names,
+            "read_file": "fs_read_file" in names,
+            "listed_directory": bool({"fs_list_directory", "fs_list_roots", "fs_search_paths"} & names),
+        }
+
+    def _answer_conflicts_with_tool_evidence(
+        self,
+        content: str,
+        *,
+        tool_records: list[dict[str, Any]],
+        had_failed_tools: bool,
+    ) -> str:
+        text = str(content or "").strip()
+        if not text:
+            return ""
+
+        normalized = text.lower()
+        flags = self._tool_evidence_flags(tool_records)
+
+        claims_tool_failure = any(
+            phrase in text
+            for phrase in (
+                "工具执行失败",
+                "无法执行工具",
+                "未能得出最终结果",
+                "tool execution failed",
+                "failed to execute tool",
+                "could not execute the tool",
+            )
+        )
+        if claims_tool_failure and not had_failed_tools:
+            return "The draft claims tool failure, but no tool failure was recorded."
+
+        claims_dir_created = (
+            ("创建" in text and ("文件夹" in text or "目录" in text))
+            or ("created" in normalized and ("folder" in normalized or "directory" in normalized))
+        )
+        if claims_dir_created and not flags["made_directory"]:
+            return "The draft claims a directory was created without a successful fs_make_directory call."
+
+        claims_file_written = any(
+            phrase in text
+            for phrase in ("写入文件", "创建文件", "保存到文件", "已写入", "文件已创建")
+        ) or any(
+            phrase in normalized
+            for phrase in ("wrote file", "created file", "saved file", "file was written")
+        )
+        if claims_file_written and not flags["wrote_file"]:
+            return "The draft claims a file write/create without a successful fs_write_file/fs_append_file call."
+
+        claims_delete = ("删除" in text or "deleted" in normalized or "removed" in normalized)
+        if claims_delete and not flags["deleted_path"]:
+            return "The draft claims deletion without a successful fs_delete_path call."
+
+        claims_move = any(
+            phrase in text
+            for phrase in ("移动", "重命名")
+        ) or any(
+            phrase in normalized
+            for phrase in ("moved", "renamed")
+        )
+        if claims_move and not flags["moved_path"]:
+            return "The draft claims move/rename without a successful fs_move_path call."
+
+        return ""
 
     def _execute_tool(
         self,
@@ -2769,6 +2935,29 @@ class LLMGateway:
         if str(tool.get("tool_kind") or "skill") == "builtin":
             return self._execute_builtin_tool(function_name, args, tool)
         return self._execute_local_skill_tool(function_name, args, tool_registry)
+
+    def _tool_error_code(self, message: str) -> str:
+        normalized = str(message or "").strip().lower()
+        if "file not found:" in normalized or "path not found:" in normalized:
+            return "FILE_NOT_FOUND"
+        if "not a directory:" in normalized:
+            return "NOT_A_DIRECTORY"
+        if "not a file:" in normalized:
+            return "NOT_A_FILE"
+        return "TOOL_ERROR"
+
+    def _is_recoverable_tool_error(
+        self,
+        *,
+        function_name: str,
+        tool_meta: dict[str, Any],
+    ) -> bool:
+        error_code = str(tool_meta.get("error_code") or "").strip()
+        return error_code == "FILE_NOT_FOUND" and function_name in {
+            "fs_read_file",
+            "fs_list_directory",
+            "fs_search_paths",
+        }
 
     def _expand_builtin_path(self, raw_path: str) -> Path:
         value = str(raw_path or "").strip()
@@ -2937,9 +3126,15 @@ class LLMGateway:
         auto_provision_errors = tool_meta.get("auto_provision_errors") or []
         attempt_count = int(tool_meta.get("attempt_count") or 1)
         max_attempts = int(tool_meta.get("max_attempts") or 1)
+        error_code = str(tool_meta.get("error_code") or "").strip() or self._tool_error_code(reason)
+        recoverable = bool(tool_meta.get("recoverable"))
 
         lines = [
-            "Tool execution failed; response generation is blocked to avoid fabricated output.",
+            (
+                "TOOL_UNAVAILABLE: This tool call failed and is temporarily unavailable for this run. "
+                "Continue without this tool when possible, clearly note the limitation, and do not claim "
+                "tool-derived facts you could not verify."
+            ),
             f"Tool: {function_name}",
         ]
         if skill_name:
@@ -2947,6 +3142,14 @@ class LLMGateway:
         if max_attempts > 1:
             lines.append(f"Attempts: {attempt_count}/{max_attempts}")
         lines.append(f"Reason: {reason}")
+        lines.append(f"Error code: {error_code}")
+        if recoverable:
+            lines.append("Recoverable: yes")
+            if error_code == "FILE_NOT_FOUND":
+                lines.append(
+                    "Suggested next action: if the missing path is an expected deliverable, create it with "
+                    "fs_make_directory or fs_write_file instead of stopping."
+                )
         if missing_launchers:
             lines.append(f"Missing launchers: {', '.join(str(item) for item in missing_launchers)}")
         if missing_deps:
@@ -3026,12 +3229,7 @@ class LLMGateway:
         missing_launchers = self._missing_command_launchers(command)
         tool_meta["missing_launchers"] = missing_launchers
         if missing_launchers:
-            joined = ", ".join(missing_launchers)
-            message = (
-                f"Tool '{function_name}' missing command launcher(s): {joined}. "
-                "Please install them and expose in PATH. "
-                "On Unix you can run backend/scripts/bootstrap-runtime.sh."
-            )
+            message = self._missing_launcher_message(missing_launchers)
             tool_meta["error"] = message
             return message, tool_meta
 

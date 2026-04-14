@@ -48,7 +48,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["run", "clear", "select-workflow"]);
+const emit = defineEmits(["run", "clear", "stop", "select-workflow"]);
 
 const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
@@ -97,6 +97,7 @@ const rightVisible = ref(true);
         :messages="props.chatMessages"
         @run="$emit('run', $event)"
         @clear="$emit('clear')"
+        @stop="$emit('stop')"
         @toggle-left="leftVisible = !leftVisible"
         @toggle-right="rightVisible = !rightVisible"
       />

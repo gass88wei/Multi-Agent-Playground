@@ -123,13 +123,8 @@ def _compile_planner_app(
         dispatch_targets[END] = END
     builder.add_conditional_edges(DISPATCH_NODE, dispatch_next, dispatch_targets)
 
-    worker_targets = {DISPATCH_NODE: DISPATCH_NODE}
-    if workflow.finalizer_enabled and synth_node is not None:
-        worker_targets[SYNTH_NODE] = SYNTH_NODE
-    else:
-        worker_targets[END] = END
     for worker in workers:
-        builder.add_conditional_edges(worker.id, worker_next, worker_targets)
+        builder.add_conditional_edges(worker.id, worker_next, {DISPATCH_NODE: DISPATCH_NODE})
 
     if workflow.finalizer_enabled and synth_node is not None:
         builder.add_edge(SYNTH_NODE, END)
@@ -163,7 +158,7 @@ def build_planner_graph(
         return selected if selected else default_worker.id
 
     def worker_next(_: PlannerState) -> str:
-        return SYNTH_NODE if workflow.finalizer_enabled else END
+        return DISPATCH_NODE
 
     app = _compile_planner_app(
         workflow,
@@ -210,22 +205,6 @@ def run_planner_executor(
             stage = str(meta.get("stage") or "")
             tool_name = str(meta.get("tool_name") or "tool")
 
-            if stage == "tool_candidates":
-                available = int(meta.get("available_count") or 0)
-                selected = int(meta.get("selected_count") or 0)
-                push(
-                    trace,
-                    event(
-                        "state_updated",
-                        "Tool Matching",
-                        f"Matched {selected}/{available} tool(s) for this request.",
-                        node_id=agent.id,
-                        agent_id=agent.id,
-                        matching=meta.get("matching", []),
-                    ),
-                )
-                return
-
             if stage == "tool_started":
                 push(
                     trace,
@@ -268,12 +247,12 @@ def run_planner_executor(
                 return
 
             if stage == "tool_blocked":
-                reason = str(meta.get("reason") or "Tool execution blocked.")
+                reason = str(meta.get("reason") or "Tool execution failed; continuing without this tool.")
                 push(
                     trace,
                     event(
                         "state_updated",
-                        "Tool Blocked",
+                        "Tool Unavailable",
                         reason[:220],
                         node_id=agent.id,
                         agent_id=agent.id,
@@ -375,6 +354,7 @@ def run_planner_executor(
             state["user_input"],
             max_tasks=4,
             force_multi=is_replan,
+            agents=workers,
         )
         if not tasks:
             tasks = _extract_tasks(state["user_input"])
@@ -480,6 +460,35 @@ def run_planner_executor(
         tasks = state.get("tasks", [])
         task_index = int(state.get("task_index", 0))
         if task_index >= len(tasks):
+            terminal_node = SYNTH_NODE if workflow.finalizer_enabled else "end"
+            push(
+                trace,
+                event(
+                    "node_entered",
+                    "Enter Dispatcher",
+                    "Dispatcher is checking whether all tasks are complete.",
+                    node_id=DISPATCH_NODE,
+                ),
+            )
+            push(
+                trace,
+                event(
+                    "route_selected",
+                    "Dispatch Complete",
+                    f"Dispatcher routed to {terminal_node}.",
+                    node_id=DISPATCH_NODE,
+                    next_node_id=terminal_node,
+                ),
+            )
+            push(
+                trace,
+                event(
+                    "node_exited",
+                    "Exit Dispatcher",
+                    "No remaining tasks to assign.",
+                    node_id=DISPATCH_NODE,
+                ),
+            )
             return {}
 
         task = tasks[task_index]
@@ -542,9 +551,39 @@ def run_planner_executor(
                     task_index=human_index,
                 ),
             )
+            plan_lines = [
+                f"{index + 1}. {task}"
+                for index, task in enumerate(tasks)
+            ]
+            plan_text = "\n".join(plan_lines) if plan_lines else "No plan available."
+            prior_reports = list(state.get("task_reports", []))
+            prior_reports_text = "\n\n".join(prior_reports) if prior_reports else "None yet."
             worker_input = (
                 f"Original user request:\n{state['user_input']}\n\n"
-                f"Task {human_index}:\n{state['current_task']}"
+                "Approved plan:\n"
+                f"{plan_text}\n\n"
+                "Completed task outputs so far:\n"
+                f"{prior_reports_text}\n\n"
+                f"Current task {human_index}:\n{state['current_task']}\n\n"
+                "Execute the current task directly.\n"
+                "This is an execution task, not a discussion task. Prefer tool actions over prose.\n"
+                "Build on prior task outputs when relevant instead of ignoring them.\n\n"
+                "Hard rules:\n"
+                "1. If the task involves files, directories, code, project outputs, desktop paths, downloads paths, or generated artifacts, you must use filesystem tools to verify or create them before making factual claims.\n"
+                "2. Do not guess whether a file, directory, project, or output exists.\n"
+                "3. If an expected file or directory does not exist and the current task requires it, create it instead of merely describing it.\n"
+                "4. If you need the correct path, search or list first, then read or write.\n"
+                "5. Do not replace a missing tool action with speculation.\n"
+                "6. Do not write a project-management update, a plan recap, or generic suggestions unless the current task is explicitly analysis-only.\n"
+                "7. If you changed, created, or verified files, say exactly which paths were involved.\n"
+                "8. If you could not complete the task, state the exact blocker and what you already verified with tools.\n\n"
+                "Execution policy:\n"
+                "- Need to know whether something exists: check with tools first.\n"
+                "- Need a directory: create it.\n"
+                "- Need a file: write it.\n"
+                "- Need file contents: read it.\n"
+                "- Need to find the right target: search/list first, then operate.\n\n"
+                "Respond in natural language with the concrete result of the current task only."
             )
             task_answer = llm_gateway.run_agent(
                 worker,
@@ -552,14 +591,22 @@ def run_planner_executor(
                 history=history,
                 trace_hook=make_tool_trace_hook(worker),
             )
-            task_reports = list(state.get("task_reports", []))
-            task_reports.append(f"Task {human_index} by {worker.name}:\n{task_answer}")
+            task_reports = prior_reports
+            task_runtime_issue = llm_gateway._is_tool_blocked_response(task_answer)  # type: ignore[attr-defined]
+            if task_runtime_issue:
+                task_reports.append(f"Task {human_index} by {worker.name} encountered an execution issue:\n{task_answer}")
+            else:
+                task_reports.append(f"Task {human_index} by {worker.name}:\n{task_answer}")
             push(
                 trace,
                 event(
                     "message_generated",
-                    "Worker Output",
-                    f"{worker.name} finished task {human_index}.",
+                    "Worker Issue" if task_runtime_issue else "Worker Output",
+                    (
+                        f"{worker.name} encountered an execution issue on task {human_index}."
+                        if task_runtime_issue
+                        else f"{worker.name} finished task {human_index}."
+                    ),
                     node_id=worker.id,
                     preview=task_answer[:120],
                 ),
@@ -574,32 +621,22 @@ def run_planner_executor(
                 ),
             )
 
-            next_index = task_index + 1
-            if next_index < len(tasks):
-                push(
-                    trace,
-                    event(
-                        "route_selected",
-                        "Next Task",
-                        "Worker returned control to dispatcher for the next task.",
-                        node_id=worker.id,
-                        next_node_id=DISPATCH_NODE,
-                        task_index=human_index,
+            next_index = len(tasks) if task_runtime_issue else task_index + 1
+            push(
+                trace,
+                event(
+                    "route_selected",
+                    "Return To Dispatcher",
+                    (
+                        "Worker returned control to dispatcher after an execution issue."
+                        if task_runtime_issue
+                        else "Worker returned control to dispatcher for the next routing decision."
                     ),
-                )
-            else:
-                terminal_node = SYNTH_NODE if workflow.finalizer_enabled else "end"
-                push(
-                    trace,
-                    event(
-                        "route_selected",
-                        "All Tasks Done",
-                        f"Worker returned control to {terminal_node}.",
-                        node_id=worker.id,
-                        next_node_id=terminal_node,
-                        task_index=human_index,
-                    ),
-                )
+                    node_id=worker.id,
+                    next_node_id=DISPATCH_NODE,
+                    task_index=human_index,
+                ),
+            )
 
             return {
                 "task_reports": task_reports,
@@ -651,11 +688,7 @@ def run_planner_executor(
         return workers[0].id
 
     def worker_next(state: PlannerState) -> str:
-        task_index = int(state.get("task_index", 0))
-        tasks_len = len(state.get("tasks", []))
-        if task_index < tasks_len:
-            return DISPATCH_NODE
-        return SYNTH_NODE if workflow.finalizer_enabled else END
+        return DISPATCH_NODE
 
     app = _compile_planner_app(
         workflow,

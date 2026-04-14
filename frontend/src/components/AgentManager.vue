@@ -4,9 +4,7 @@ import {
   CheckCircle2,
   Code,
   Database,
-  FileText,
   FolderOpen,
-  FolderSearch,
   Globe,
   Image as ImageIcon,
   Library,
@@ -124,21 +122,9 @@ const storeAgent = computed(
 
 const builtinCapabilityOptions = [
   {
-    id: "fs_list",
-    label: "List Directories",
-    description: "Allow listing local files and folders.",
-    icon: FolderSearch,
-  },
-  {
-    id: "fs_read",
-    label: "Read Files",
-    description: "Allow reading local text files.",
-    icon: FileText,
-  },
-  {
-    id: "fs_write",
-    label: "Write Files",
-    description: "Allow creating or overwriting local text files.",
+    id: "filesystem",
+    label: "File Operations",
+    description: "Allow searching, listing, reading, writing, creating directories, moving, and deleting local paths.",
     icon: PencilLine,
   },
 ];
@@ -391,7 +377,7 @@ function getSkillDisplay(skillId) {
 </script>
 
 <template>
-  <section class="page-stack">
+  <section class="page-stack agents-page">
     <div class="manager-topbar">
       <div>
         <h2>Agents</h2>

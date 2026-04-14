@@ -16,6 +16,7 @@ from .schemas import (
     AgentDefinitionUpdate,
     Conversation,
     ConversationCreate,
+    ConversationDetail,
     Message,
     SkillDefinition,
     SkillDefinitionCreate,
@@ -142,6 +143,12 @@ class SQLitePlaygroundStore:
                 "source_skill_id",
                 "TEXT NULL",
             )
+            self._ensure_column(
+                connection,
+                "skills",
+                "local_path",
+                "TEXT NULL",
+            )
             connection.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_skills_source_unique
@@ -249,6 +256,12 @@ class SQLitePlaygroundStore:
         if not isinstance(builtin_capabilities, list):
             builtin_capabilities = []
 
+        normalized_capabilities: list[str] = []
+        filesystem_aliases = {"filesystem", "fs_list", "fs_read", "fs_write"}
+        has_filesystem = any(str(item).strip() in filesystem_aliases for item in builtin_capabilities)
+        if has_filesystem:
+            normalized_capabilities.append("filesystem")
+
         return AgentDefinition(
             id=row["id"],
             name=row["name"],
@@ -256,11 +269,7 @@ class SQLitePlaygroundStore:
             system_prompt=row["system_prompt"],
             model=row["model"],
             skill_ids=skill_ids,
-            builtin_capabilities=[
-                str(item).strip()
-                for item in builtin_capabilities
-                if str(item).strip()
-            ],
+            builtin_capabilities=normalized_capabilities,
         )
 
     def _row_to_skill(self, row: sqlite3.Row) -> SkillDefinition:
@@ -272,6 +281,7 @@ class SQLitePlaygroundStore:
             instruction=row["instruction"],
             source_provider=row["source_provider"] if "source_provider" in columns else None,
             source_skill_id=row["source_skill_id"] if "source_skill_id" in columns else None,
+            local_path=row["local_path"] if "local_path" in columns else None,
         )
 
     def _sanitize_skill_dirname(self, text: str) -> str:
@@ -412,6 +422,7 @@ class SQLitePlaygroundStore:
         instruction: str,
         source_provider: str | None,
         source_skill_id: str | None,
+        local_path: str | None = None,
         tool: dict[str, Any] | None = None,
         package_files: dict[str, str] | None = None,
     ) -> None:
@@ -449,6 +460,7 @@ class SQLitePlaygroundStore:
             "instruction": instruction,
             "source_provider": source_provider,
             "source_skill_id": source_skill_id,
+            "local_path": local_path or str(skill_dir),
         }
         normalized_tool = self._normalize_tool(tool)
         if normalized_tool is None:
@@ -498,6 +510,12 @@ class SQLitePlaygroundStore:
             if raw_source_skill not in (None, "")
             else None
         )
+        raw_local_path = payload.get("local_path")
+        local_path = (
+            str(raw_local_path).strip()
+            if raw_local_path not in (None, "")
+            else str(skill_json.parent)
+        )
 
         return SkillDefinition(
             id=skill_id,
@@ -507,7 +525,7 @@ class SQLitePlaygroundStore:
             source_provider=source_provider,
             source_skill_id=source_skill_id,
             tool=tool,
-            local_path=str(skill_json.parent),
+            local_path=local_path,
         )
 
     def _parse_skill_frontmatter(self, markdown_text: str) -> tuple[str | None, str | None]:
@@ -753,22 +771,152 @@ class SQLitePlaygroundStore:
 
     def _load_file_skills(self) -> dict[str, SkillDefinition]:
         loaded: dict[str, SkillDefinition] = {}
+        identity_owner: dict[str, str] = {}
+
+        def register_skill(skill: SkillDefinition) -> None:
+            if skill.id in loaded:
+                loaded[skill.id] = skill
+                return
+
+            for identity_key in self._skill_identity_keys(skill):
+                owner_id = identity_owner.get(identity_key)
+                if owner_id and owner_id in loaded:
+                    return
+
+            loaded[skill.id] = skill
+            for identity_key in self._skill_identity_keys(skill):
+                identity_owner[identity_key] = skill.id
+
         for root in self._iter_skill_roots():
             for skill_json in root.rglob("skill.json"):
                 skill = self._read_file_skill(skill_json)
                 if skill is None:
                     continue
-                loaded[skill.id] = skill
+                register_skill(skill)
             for skill_md in root.rglob("SKILL.md"):
                 markdown_skill = self._read_markdown_skill(skill_md)
                 if markdown_skill is None:
                     continue
-                if markdown_skill.id not in loaded:
-                    loaded[markdown_skill.id] = markdown_skill
+                register_skill(markdown_skill)
         return loaded
 
     def _normalize_skill_ref(self, value: str) -> str:
         return str(value).strip().replace("\\", "/").strip().lower()
+
+    def _normalize_skill_local_path(self, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve()).replace("\\", "/").strip().lower()
+        except OSError:
+            return raw.replace("\\", "/").strip().lower()
+
+    def _find_existing_skill_record(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_provider: str | None = None,
+        source_skill_id: str | None = None,
+        local_path: str | None = None,
+    ) -> sqlite3.Row | None:
+        provider = str(source_provider or "").strip()
+        source_id = str(source_skill_id or "").strip()
+        normalized_path = self._normalize_skill_local_path(local_path or "")
+
+        if provider and source_id:
+            row = connection.execute(
+                """
+                SELECT id, name, description, instruction, source_provider, source_skill_id, local_path
+                FROM skills
+                WHERE source_provider = ? AND source_skill_id = ?
+                """,
+                (provider, source_id),
+            ).fetchone()
+            if row is not None:
+                return row
+
+        if normalized_path:
+            rows = connection.execute(
+                """
+                SELECT id, name, description, instruction, source_provider, source_skill_id, local_path
+                FROM skills
+                WHERE local_path IS NOT NULL
+                """
+            ).fetchall()
+            for row in rows:
+                if self._normalize_skill_local_path(str(row["local_path"] or "")) == normalized_path:
+                    return row
+        return None
+
+    def _upsert_skill_record(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        name: str,
+        description: str,
+        instruction: str,
+        source_provider: str | None,
+        source_skill_id: str | None,
+        local_path: str | None,
+    ) -> str:
+        existing = self._find_existing_skill_record(
+            connection,
+            source_provider=source_provider,
+            source_skill_id=source_skill_id,
+            local_path=local_path,
+        )
+        normalized_path = str(local_path or "").strip() or None
+        if existing is not None:
+            connection.execute(
+                """
+                UPDATE skills
+                SET name = ?, description = ?, instruction = ?, source_provider = ?, source_skill_id = ?, local_path = ?
+                WHERE id = ?
+                """,
+                (
+                    name[:80],
+                    description[:200],
+                    instruction,
+                    source_provider,
+                    source_skill_id,
+                    normalized_path,
+                    existing["id"],
+                ),
+            )
+            return str(existing["id"])
+
+        skill_id = _new_id("skill")
+        connection.execute(
+            """
+            INSERT INTO skills (
+                id, name, description, instruction, source_provider, source_skill_id, local_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                skill_id,
+                name[:80],
+                description[:200],
+                instruction,
+                source_provider,
+                source_skill_id,
+                normalized_path,
+            ),
+        )
+        return skill_id
+
+    def _skill_identity_keys(self, skill: SkillDefinition) -> set[str]:
+        keys: set[str] = set()
+        source_provider = str(skill.source_provider or "").strip().lower()
+        source_skill_id = self._normalize_skill_ref(str(skill.source_skill_id or ""))
+        if source_provider and source_skill_id:
+            keys.add(f"source:{source_provider}:{source_skill_id}")
+
+        local_path = self._normalize_skill_local_path(str(skill.local_path or ""))
+        if local_path:
+            keys.add(f"path:{local_path}")
+        return keys
 
     def _skill_aliases(self, skill: SkillDefinition) -> set[str]:
         aliases: set[str] = set()
@@ -907,7 +1055,7 @@ class SQLitePlaygroundStore:
                 """
                 SELECT id, name, description, system_prompt, model, skill_ids, builtin_capabilities
                 FROM agents
-                ORDER BY created_at ASC, id ASC
+                ORDER BY created_at DESC, id DESC
                 """
             ).fetchall()
         return [self._row_to_agent(row) for row in rows]
@@ -1012,20 +1160,17 @@ class SQLitePlaygroundStore:
         return found
 
     def create_skill(self, payload: SkillDefinitionCreate) -> SkillDefinition:
-        skill = SkillDefinition(id=_new_id("skill"), **payload.model_dump())
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO skills (id, name, description, instruction, source_provider, source_skill_id)
-                VALUES (?, ?, ?, ?, NULL, NULL)
-                """,
-                (
-                    skill.id,
-                    skill.name,
-                    skill.description,
-                    skill.instruction,
-                ),
+            skill_id = self._upsert_skill_record(
+                connection,
+                name=payload.name,
+                description=payload.description,
+                instruction=payload.instruction,
+                source_provider=None,
+                source_skill_id=None,
+                local_path=None,
             )
+        skill = SkillDefinition(id=skill_id, **payload.model_dump())
         self._write_skill_package_file(
             skill_id=skill.id,
             name=skill.name,
@@ -1033,6 +1178,7 @@ class SQLitePlaygroundStore:
             instruction=skill.instruction,
             source_provider=None,
             source_skill_id=None,
+            local_path=None,
             tool=None,
         )
         return skill
@@ -1061,53 +1207,35 @@ class SQLitePlaygroundStore:
                 if not (source_skill_id and name and description and instruction):
                     continue
 
-                row = connection.execute(
-                    """
-                    SELECT id FROM skills
-                    WHERE source_provider = ? AND source_skill_id = ?
-                    """,
-                    (source_provider, source_skill_id),
-                ).fetchone()
-
-                if row:
-                    connection.execute(
-                        """
-                        UPDATE skills
-                        SET name = ?, description = ?, instruction = ?
-                        WHERE id = ?
-                        """,
-                        (name[:80], description[:200], instruction, row["id"]),
-                    )
+                existing = self._find_existing_skill_record(
+                    connection,
+                    source_provider=source_provider,
+                    source_skill_id=source_skill_id,
+                    local_path=None,
+                )
+                skill_id = self._upsert_skill_record(
+                    connection,
+                    name=name,
+                    description=description,
+                    instruction=instruction,
+                    source_provider=source_provider,
+                    source_skill_id=source_skill_id,
+                    local_path=None,
+                )
+                if existing:
                     self._write_skill_package_file(
-                        skill_id=row["id"],
+                        skill_id=skill_id,
                         name=name,
                         description=description,
                         instruction=instruction,
                         source_provider=source_provider,
                         source_skill_id=source_skill_id,
+                        local_path=None,
                         tool=tool,
                         package_files=package_files,
                     )
                     updated += 1
                     continue
-
-                skill_id = _new_id("skill")
-                connection.execute(
-                    """
-                    INSERT INTO skills (
-                        id, name, description, instruction, source_provider, source_skill_id
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        skill_id,
-                        name[:80],
-                        description[:200],
-                        instruction,
-                        source_provider,
-                        source_skill_id,
-                    ),
-                )
                 self._write_skill_package_file(
                     skill_id=skill_id,
                     name=name,
@@ -1115,6 +1243,7 @@ class SQLitePlaygroundStore:
                     instruction=instruction,
                     source_provider=source_provider,
                     source_skill_id=source_skill_id,
+                    local_path=None,
                     tool=tool,
                     package_files=package_files,
                 )
@@ -1141,26 +1270,28 @@ class SQLitePlaygroundStore:
         next_instruction = str(instruction or existing.instruction).strip() or existing.instruction
 
         with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE skills
-                SET name = ?, description = ?, instruction = ?
-                WHERE id = ?
-                """,
-                (next_name[:80], next_description[:200], next_instruction, skill_id),
+            canonical_skill_id = self._upsert_skill_record(
+                connection,
+                name=next_name,
+                description=next_description,
+                instruction=next_instruction,
+                source_provider=existing.source_provider,
+                source_skill_id=existing.source_skill_id,
+                local_path=existing.local_path,
             )
 
         self._write_skill_package_file(
-            skill_id=skill_id,
+            skill_id=canonical_skill_id,
             name=next_name,
             description=next_description,
             instruction=next_instruction,
             source_provider=existing.source_provider,
             source_skill_id=existing.source_skill_id,
+            local_path=existing.local_path,
             tool=tool,
             package_files=package_files,
         )
-        return self.get_skill(skill_id)
+        return self.get_skill(canonical_skill_id)
 
     def set_agent_skill_ids(self, agent_id: str, skill_ids: list[str]) -> None:
         with self._connect() as connection:
@@ -1342,6 +1473,15 @@ class SQLitePlaygroundStore:
                 ),
                 required_agent_count=1,
             ),
+            WorkflowTemplate(
+                type="peer_handoff",
+                label="Peer Handoff",
+                description=(
+                    "Router chooses the first owner, then specialists can hand work to each other "
+                    "through structured peer actions until the workflow converges."
+                ),
+                required_agent_count=2,
+            ),
         ]
 
     # ============ Conversation CRUD ============
@@ -1399,12 +1539,12 @@ class SQLitePlaygroundStore:
             ).fetchone()
         return self._row_to_conversation(row) if row else None
 
-    def get_conversation_with_messages(self, conversation_id: str) -> Conversation | None:
+    def get_conversation_with_messages(self, conversation_id: str) -> ConversationDetail | None:
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
             return None
         messages = self.list_messages(conversation_id)
-        return Conversation(
+        return ConversationDetail(
             id=conversation.id,
             workflow_id=conversation.workflow_id,
             title=conversation.title,

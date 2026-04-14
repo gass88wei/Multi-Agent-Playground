@@ -163,6 +163,7 @@ async function submit() {
               <option value="planner_executor">{{ workflowTypeLabel("planner_executor") }}</option>
               <option value="supervisor_dynamic">{{ workflowTypeLabel("supervisor_dynamic") }}</option>
               <option value="single_agent_chat">{{ workflowTypeLabel("single_agent_chat") }}</option>
+              <option value="peer_handoff">{{ workflowTypeLabel("peer_handoff") }}</option>
             </select>
             <textarea
               v-model="form.description"

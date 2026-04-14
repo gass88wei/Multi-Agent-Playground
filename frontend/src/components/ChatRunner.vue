@@ -1,5 +1,5 @@
 <script setup>
-import { MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Send } from "lucide-vue-next";
+import { MessageSquare, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Send, Square } from "lucide-vue-next";
 import { inject, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { marked } from "marked";
 import { I18N_KEY } from "../i18n";
@@ -31,7 +31,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["run", "clear", "toggle-left", "toggle-right"]);
+const emit = defineEmits(["run", "clear", "stop", "toggle-left", "toggle-right"]);
 const i18n = inject(I18N_KEY, null);
 const t = i18n?.t || ((key) => key);
 
@@ -177,6 +177,14 @@ watch(
           @input="handleInput"
           @keydown="handleKeydown"
         />
+        <button
+          v-if="loading"
+          class="stop-mini-button"
+          type="button"
+          @click="$emit('stop')"
+        >
+          <Square :size="12" />
+        </button>
         <button class="send-mini-button" :disabled="!selectedWorkflowId || loading" @click="submit">
           <Send :size="14" />
         </button>

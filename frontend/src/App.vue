@@ -56,6 +56,8 @@ const activeRunController = ref(null);
 const skillSyncStatus = ref("");
 const appSettings = ref(null);
 const savingSettings = ref(false);
+const conversationStorageKey = "agent-playground:workflow-conversations";
+const selectedWorkflowStorageKey = "agent-playground:selected-workflow";
 
 const i18n = createUiI18n();
 provide(I18N_KEY, i18n);
@@ -84,6 +86,85 @@ const selectedWorkflow = computed(() =>
   workflows.value.find((workflow) => workflow.id === selectedWorkflowId.value) || null,
 );
 
+function readConversationStorage() {
+  try {
+    const raw = window.localStorage.getItem(conversationStorageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function getStoredSelectedWorkflowId() {
+  try {
+    return String(window.localStorage.getItem(selectedWorkflowStorageKey) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function setStoredSelectedWorkflowId(workflowId) {
+  try {
+    if (workflowId) {
+      window.localStorage.setItem(selectedWorkflowStorageKey, workflowId);
+    } else {
+      window.localStorage.removeItem(selectedWorkflowStorageKey);
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function writeConversationStorage(payload) {
+  try {
+    window.localStorage.setItem(conversationStorageKey, JSON.stringify(payload));
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function getStoredConversationId(workflowId) {
+  if (!workflowId) return "";
+  const store = readConversationStorage();
+  const found = store.find((item) => String(item?.workflow_id || "") === workflowId);
+  return String(found?.conversation_id || "").trim();
+}
+
+function setStoredConversationId(workflowId, conversationId) {
+  if (!workflowId) return;
+  const store = readConversationStorage().filter(
+    (item) => String(item?.workflow_id || "") !== workflowId,
+  );
+  if (conversationId) {
+    store.push({
+      workflow_id: workflowId,
+      conversation_id: conversationId,
+    });
+  }
+  writeConversationStorage(store);
+}
+
+async function restoreConversation(workflowId) {
+  const conversationId = getStoredConversationId(workflowId);
+  if (!conversationId) return;
+  try {
+    const conversation = await fetchConversation(conversationId);
+    currentConversationId.value = conversation.id;
+    chatMessages.value = (conversation.messages || []).map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      agentName: message.agent_name || "",
+    }));
+  } catch {
+    currentConversationId.value = "";
+    chatMessages.value = [];
+    setStoredConversationId(workflowId, "");
+  }
+}
+
 async function loadInitialData() {
   [templates.value, skills.value, agents.value, workflows.value, appSettings.value] = await Promise.all([
     fetchTemplates(),
@@ -94,7 +175,9 @@ async function loadInitialData() {
   ]);
 
   if (!selectedWorkflowId.value && workflows.value.length) {
-    selectedWorkflowId.value = workflows.value[0].id;
+    const storedWorkflowId = getStoredSelectedWorkflowId();
+    const restoredWorkflow = workflows.value.find((workflow) => workflow.id === storedWorkflowId);
+    selectedWorkflowId.value = restoredWorkflow?.id || workflows.value[0].id;
   }
 }
 
@@ -144,8 +227,12 @@ async function replayTrace(traceEvents) {
 async function handleCreateAgent(payload) {
   errorMessage.value = "";
   try {
-    await createAgent(payload);
-    agents.value = await fetchAgents();
+    const createdAgent = await createAgent(payload);
+    const latestAgents = await fetchAgents();
+    agents.value = [
+      createdAgent,
+      ...latestAgents.filter((agent) => agent.id !== createdAgent.id),
+    ];
   } catch (error) {
     errorMessage.value = String(error.message || error);
   }
@@ -261,6 +348,7 @@ async function handleSaveSettings(payload) {
   savingSettings.value = true;
   try {
     appSettings.value = await updateAppSettings(payload);
+    skills.value = await fetchSkills();
   } catch (error) {
     errorMessage.value = String(error.message || error);
   } finally {
@@ -340,6 +428,7 @@ async function handleRun(payload) {
       selectedGraph.value = runResult.graph;
       if (runResult.conversation_id) {
         currentConversationId.value = runResult.conversation_id;
+        setStoredConversationId(payload.workflow_id, runResult.conversation_id);
       }
       const finished = await replayTrace(runResult.trace || []);
       if (finished && token === replayToken.value) {
@@ -363,6 +452,7 @@ async function handleRun(payload) {
     displayedTrace.value = streamResult.trace || displayedTrace.value;
     if (streamResult.conversation_id) {
       currentConversationId.value = streamResult.conversation_id;
+      setStoredConversationId(payload.workflow_id, streamResult.conversation_id);
     }
     const assistantMessage = {
       id: `assistant_${Date.now()}`,
@@ -393,6 +483,9 @@ function handleClearRun() {
   }
   lastRun.value = null;
   chatMessages.value = [];
+  if (selectedWorkflowId.value) {
+    setStoredConversationId(selectedWorkflowId.value, "");
+  }
   currentConversationId.value = "";
   displayedTrace.value = [];
   replayNodeId.value = "";
@@ -400,7 +493,17 @@ function handleClearRun() {
   replayToken.value += 1;
 }
 
+function handleStopRun() {
+  if (activeRunController.value) {
+    activeRunController.value.abort();
+    activeRunController.value = null;
+  }
+  replayingTrace.value = false;
+  loading.value = false;
+}
+
 watch(selectedWorkflowId, async (workflowId) => {
+  setStoredSelectedWorkflowId(workflowId);
   if (activeRunController.value) {
     activeRunController.value.abort();
     activeRunController.value = null;
@@ -413,12 +516,14 @@ watch(selectedWorkflowId, async (workflowId) => {
   replayingTrace.value = false;
   replayToken.value += 1;
   await loadGraph(workflowId);
+  await restoreConversation(workflowId);
 });
 
 onMounted(async () => {
   try {
     await loadInitialData();
     await loadGraph(selectedWorkflowId.value);
+    await restoreConversation(selectedWorkflowId.value);
   } catch (error) {
     errorMessage.value = String(error.message || error);
   }
@@ -530,6 +635,7 @@ onMounted(async () => {
             :chat-messages="chatMessages"
             @run="handleRun"
             @clear="handleClearRun"
+            @stop="handleStopRun"
             @select-workflow="selectedWorkflowId = $event"
           />
 

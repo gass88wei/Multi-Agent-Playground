@@ -2,7 +2,6 @@
 import { computed, inject, reactive, ref, watch } from "vue";
 import {
   CheckCircle2,
-  ChevronDown,
   ChevronUp,
   Copy,
   GripVertical,
@@ -14,6 +13,7 @@ import {
   Save,
   Settings2,
   Trash2,
+  X,
 } from "lucide-vue-next";
 import { I18N_KEY } from "../i18n";
 
@@ -38,6 +38,7 @@ const form = reactive({
   env_vars: [],
 });
 const editingProfileId = ref("");
+const editingEnvId = ref("");
 const providerPresets = [
   {
     id: "moonshot",
@@ -75,8 +76,10 @@ function makeProfile(index = 0) {
 
 function makeEnvVar() {
   return {
+    id: `env_draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     key: "",
     value: "",
+    isDraft: true,
   };
 }
 
@@ -90,10 +93,18 @@ watch(
     form.active_model_profile_id =
       value?.active_model_profile_id || form.model_profiles[0]?.id || "";
     form.env_vars = Array.isArray(value?.env_vars)
-      ? value.env_vars.map((entry) => ({ ...entry }))
+      ? value.env_vars.map((entry, index) => ({
+          id: `env_saved_${index}`,
+          key: String(entry.key || ""),
+          value: String(entry.value || ""),
+          isDraft: false,
+        }))
       : [];
     if (!form.model_profiles.some((profile) => profile.id === editingProfileId.value)) {
       editingProfileId.value = "";
+    }
+    if (!form.env_vars.some((entry) => entry.id === editingEnvId.value)) {
+      editingEnvId.value = "";
     }
   },
   { immediate: true },
@@ -131,6 +142,7 @@ function applyProviderPreset(profile, presetId) {
 }
 
 function removeProfile(profileId) {
+  if (props.saving) return;
   if (form.model_profiles.length <= 1) return;
   form.model_profiles = form.model_profiles.filter((profile) => profile.id !== profileId);
   if (form.active_model_profile_id === profileId) {
@@ -139,6 +151,7 @@ function removeProfile(profileId) {
   if (editingProfileId.value === profileId) {
     editingProfileId.value = "";
   }
+  submitModelProfiles();
 }
 
 function toggleEditProfile(profileId) {
@@ -146,11 +159,19 @@ function toggleEditProfile(profileId) {
 }
 
 function addEnvVar() {
-  form.env_vars = [...form.env_vars, makeEnvVar()];
+  const entry = makeEnvVar();
+  form.env_vars = [...form.env_vars, entry];
+  editingEnvId.value = entry.id;
 }
 
 function removeEnvVar(index) {
+  if (props.saving) return;
+  const removed = form.env_vars[index];
   form.env_vars = form.env_vars.filter((_, itemIndex) => itemIndex !== index);
+  if (removed?.id === editingEnvId.value) {
+    editingEnvId.value = "";
+  }
+  submitEnvVars();
 }
 
 function profileInitial(name) {
@@ -171,14 +192,92 @@ function buildPayload() {
   };
 }
 
-function submit() {
-  emit("save", buildPayload());
+function buildSavedEnvVars() {
+  return Array.isArray(props.settings?.env_vars)
+    ? props.settings.env_vars.map((entry) => ({
+        key: String(entry.key || "").trim(),
+        value: String(entry.value || ""),
+      }))
+    : [];
+}
+
+function buildSavedProfiles() {
+  return Array.isArray(props.settings?.model_profiles)
+    ? props.settings.model_profiles.map((profile) => ({ ...profile }))
+    : [];
+}
+
+function submitModelProfiles() {
+  if (props.saving) return;
+  emit("save", {
+    ...buildPayload(),
+    env_vars: buildSavedEnvVars(),
+  });
+}
+
+function submitEnvVars() {
+  if (props.saving) return;
+  emit("save", {
+    model_profiles: buildSavedProfiles(),
+    active_model_profile_id:
+      props.settings?.active_model_profile_id || props.settings?.model_profiles?.[0]?.id || null,
+    env_vars: buildPayload().env_vars,
+  });
+}
+
+function saveEnvVarOnEnter(event) {
+  if (event.isComposing) return;
+  if (props.saving) return;
+  const envId = String(event?.target?.dataset?.envId || "").trim();
+  if (envId) {
+    submitEnvEntry(envId);
+  }
 }
 
 function activateAndSave(profileId) {
   if (props.saving) return;
   form.active_model_profile_id = profileId;
-  emit("save", buildPayload());
+  submitModelProfiles();
+}
+
+function editEnvVar(envId) {
+  editingEnvId.value = envId;
+}
+
+function cancelEnvEdit(envId) {
+  const index = form.env_vars.findIndex((entry) => entry.id === envId);
+  if (index < 0) return;
+  const entry = form.env_vars[index];
+  if (entry.isDraft) {
+    form.env_vars = form.env_vars.filter((item) => item.id !== envId);
+  } else {
+    const savedEntries = Array.isArray(props.settings?.env_vars) ? props.settings.env_vars : [];
+    const savedIndex = Number(String(envId).replace("env_saved_", ""));
+    const savedEntry = savedEntries[savedIndex] || { key: "", value: "" };
+    form.env_vars[index] = {
+      id: envId,
+      key: String(savedEntry.key || ""),
+      value: String(savedEntry.value || ""),
+      isDraft: false,
+    };
+  }
+  if (editingEnvId.value === envId) {
+    editingEnvId.value = "";
+  }
+}
+
+function submitEnvEntry(envId) {
+  const entry = form.env_vars.find((item) => item.id === envId);
+  if (!entry || !String(entry.key || "").trim()) return;
+  editingEnvId.value = "";
+  submitEnvVars();
+}
+
+function envValuePreview(value) {
+  const raw = String(value || "");
+  if (!raw) return t("settings.envNoValue");
+  if (raw.length <= 4) return "••••";
+  return `••••${raw.slice(-4)}`;
 }
 </script>
 
@@ -331,16 +430,29 @@ function activateAndSave(profileId) {
                 />
               </label>
             </div>
+
+            <div class="settings-profile-editor-actions">
+              <button
+                type="button"
+                class="primary-button"
+                :disabled="saving"
+                @click="submitModelProfiles"
+              >
+                <Save :size="16" />
+                {{ saving ? t("settings.saving") : t("settings.saveProfile") }}
+              </button>
+              <button
+                type="button"
+                class="ghost-button"
+                :disabled="saving"
+                @click="toggleEditProfile(profile.id)"
+              >
+                {{ t("settings.closeEditor") }}
+              </button>
+            </div>
           </div>
 
         </article>
-      </div>
-
-      <div class="settings-actions">
-        <button type="button" class="primary-button" :disabled="saving" @click="submit">
-          <Save :size="16" />
-          {{ saving ? t("settings.saving") : t("settings.save") }}
-        </button>
       </div>
     </section>
 
@@ -359,18 +471,72 @@ function activateAndSave(profileId) {
         </button>
       </div>
 
+      <div class="settings-inline-hint">
+        {{ t("settings.envVarsHint") }}
+      </div>
+
       <div v-if="form.env_vars.length" class="settings-env-list">
-        <div
+        <article
           v-for="(entry, index) in form.env_vars"
-          :key="`env_${index}`"
-          class="settings-env-row"
+          :key="entry.id"
+          class="settings-env-item"
+          :class="{ editing: editingEnvId === entry.id }"
         >
-          <input v-model="entry.key" :placeholder="t('settings.envKeyPlaceholder')" />
-          <input v-model="entry.value" :placeholder="t('settings.envValuePlaceholder')" />
-          <button type="button" class="agent-modal-remove-skill" @click="removeEnvVar(index)">
-            <Trash2 :size="14" />
-          </button>
-        </div>
+          <template v-if="editingEnvId === entry.id">
+            <div class="settings-env-editor">
+              <div class="settings-env-row">
+                <input
+                  v-model="entry.key"
+                  :data-env-id="entry.id"
+                  :placeholder="t('settings.envKeyPlaceholder')"
+                  @keydown.enter.prevent="saveEnvVarOnEnter"
+                />
+                <input
+                  v-model="entry.value"
+                  :data-env-id="entry.id"
+                  :placeholder="t('settings.envValuePlaceholder')"
+                  @keydown.enter.prevent="saveEnvVarOnEnter"
+                />
+              </div>
+              <div class="settings-env-editor-actions">
+                <button
+                  type="button"
+                  class="settings-env-save"
+                  :disabled="saving || !String(entry.key || '').trim()"
+                  @click="submitEnvEntry(entry.id)"
+                >
+                  <Save :size="14" />
+                  {{ saving ? t("settings.saving") : t("settings.saveEnvVar") }}
+                </button>
+                <button
+                  type="button"
+                  class="ghost-button"
+                  :disabled="saving"
+                  @click="cancelEnvEdit(entry.id)"
+                >
+                  <X :size="14" />
+                  {{ t("settings.closeEditor") }}
+                </button>
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            <div class="settings-env-summary">
+              <div class="settings-env-copy">
+                <div class="settings-env-key">{{ entry.key }}</div>
+                <div class="settings-env-value">{{ envValuePreview(entry.value) }}</div>
+              </div>
+              <div class="settings-env-actions">
+                <button type="button" class="settings-profile-icon-action" @click="editEnvVar(entry.id)">
+                  <Pencil :size="16" />
+                </button>
+                <button type="button" class="settings-profile-icon-action" @click="removeEnvVar(index)">
+                  <Trash2 :size="16" />
+                </button>
+              </div>
+            </div>
+          </template>
+        </article>
       </div>
       <div v-else class="agent-empty-meta">{{ t("settings.envEmpty") }}</div>
 

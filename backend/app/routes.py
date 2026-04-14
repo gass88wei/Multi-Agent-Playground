@@ -38,6 +38,7 @@ from .settings_bridge import (
 from .skillhub_client import skillhub_client
 from .store import store
 from .workflows.planner_executor import build_planner_graph, run_planner_executor
+from .workflows.peer_handoff import build_peer_handoff_graph, run_peer_handoff
 from .workflows.router_specialists import build_router_graph, run_router_specialists
 from .workflows.single_agent_chat import build_single_agent_graph, run_single_agent_chat
 from .workflows.supervisor_dynamic import build_supervisor_graph, run_supervisor_dynamic
@@ -321,6 +322,8 @@ def get_workflow_graph(workflow_id: str) -> WorkflowGraph:
         return build_supervisor_graph(workflow, agents)
     if workflow.type == "single_agent_chat":
         return build_single_agent_graph(workflow, agents)
+    if workflow.type == "peer_handoff":
+        return build_peer_handoff_graph(workflow, agents)
 
     raise HTTPException(status_code=400, detail=f"Unsupported workflow type: {workflow.type}")
 
@@ -344,6 +347,8 @@ def _dispatch_run(
         return run_supervisor_dynamic(store, workflow, user_input, history=history, on_event=on_event)
     if workflow.type == "single_agent_chat":
         return run_single_agent_chat(store, workflow, user_input, history=history, on_event=on_event)
+    if workflow.type == "peer_handoff":
+        return run_peer_handoff(store, workflow, user_input, history=history, on_event=on_event)
     raise HTTPException(status_code=400, detail=f"Unsupported workflow type: {workflow.type}")
 
 

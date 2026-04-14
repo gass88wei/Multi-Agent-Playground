@@ -6,7 +6,7 @@ from typing import Any
 from ..schemas import WorkflowEdge, WorkflowGraph, WorkflowNode
 
 
-_VALID_KINDS = {"start", "logic", "agent", "final", "end"}
+_VALID_KINDS = {"start", "logic", "agent", "final", "end", "group"}
 
 
 def _normalize_node_id(node_id: str) -> str:
