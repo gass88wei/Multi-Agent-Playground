@@ -41,6 +41,8 @@ class AgentAction(TypedDict, total=False):
 class PeerState(TypedDict, total=False):
     user_input: str
     current_task_title: str
+    confirmed_workspace: str
+    confirmed_paths: list[str]
     current_owner_id: str
     current_owner_name: str
     last_worker_id: str
@@ -61,6 +63,11 @@ class ToolOutcome(TypedDict, total=False):
     failed: bool
     ok: bool
     message: str
+
+
+class ToolArtifacts(TypedDict, total=False):
+    output_dir: str
+    generated_files: list[str]
 
 
 class RootCompletionDecision(TypedDict, total=False):
@@ -109,6 +116,7 @@ def _build_peer_execution_prompt(
     current_task_title: str,
     peer_directory: str,
     available_outputs: str,
+    workspace_context: str,
 ) -> str:
     return (
         "# Peer Task Execution\n"
@@ -126,6 +134,7 @@ def _build_peer_execution_prompt(
         "- Summarize the concrete work actually completed at the end of this execution step.\n\n"
         "## Context\n"
         f"Original user request:\n{user_input}\n\n"
+        f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
         f"What is already available from previous peers:\n{available_outputs}\n\n"
         f"Available peers:\n{peer_directory}\n\n"
         f"Current task:\n{current_task_title}"
@@ -138,6 +147,7 @@ def _build_peer_decision_prompt(
     current_task_title: str,
     peer_directory: str,
     available_outputs: str,
+    workspace_context: str,
     execution_result: str,
 ) -> str:
     return (
@@ -161,6 +171,7 @@ def _build_peer_decision_prompt(
         "- Never target yourself.\n\n"
         "## Context\n"
         f"Original user request:\n{user_input}\n\n"
+        f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
         f"Current task:\n{current_task_title}\n\n"
         f"What is already available from previous peers:\n{available_outputs}\n\n"
         f"Latest execution result:\n{execution_result}\n\n"
@@ -433,6 +444,19 @@ def _available_outputs_block(reports: list[str]) -> str:
     return "\n".join(lines[-4:])
 
 
+def _workspace_context_text(state: PeerState) -> str:
+    confirmed_workspace = str(state.get("confirmed_workspace") or "").strip()
+    confirmed_paths = [str(item).strip() for item in (state.get("confirmed_paths") or []) if str(item).strip()]
+    if confirmed_workspace and confirmed_paths:
+        paths_block = "\n".join(f"- {path}" for path in confirmed_paths[-6:])
+        return f"{confirmed_workspace}\nConfirmed files:\n{paths_block}"
+    if confirmed_workspace:
+        return confirmed_workspace
+    if confirmed_paths:
+        return "\n".join(f"- {path}" for path in confirmed_paths[-6:])
+    return "Not confirmed yet. If the original request specifies a delivery location, keep using that same location consistently."
+
+
 def _review_root_completion(
     *,
     user_input: str,
@@ -451,6 +475,12 @@ def _review_root_completion(
         for worker in workers
     ) or "(no peers)"
     available_outputs = _available_outputs_block(reports)
+    workspace_context = _workspace_context_text(
+        PeerState(
+            confirmed_workspace="",
+            confirmed_paths=[],
+        )
+    )
     prompt = (
         "You are the root-task completion reviewer for a peer handoff workflow.\n"
         "Your job is to decide whether the ORIGINAL user request is fully complete, not just whether the current subtask looks complete.\n\n"
@@ -464,6 +494,7 @@ def _review_root_completion(
         "- Only route back to the user when genuine missing information blocks sensible progress; otherwise pick the most suitable peer and next task.\n"
         "- Do not treat a completed design step, requirement step, or implementation step as equivalent to full user-request completion unless the original request is actually satisfied.\n\n"
         f"Original user request:\n{user_input}\n\n"
+        f"Confirmed delivery/workspace path:\n{workspace_context}\n\n"
         f"Current task:\n{current_task_title}\n\n"
         f"Latest worker:\n- id={last_worker.id}; name={last_worker.name}; specialty={last_worker.description}\n\n"
         f"Latest proposed action:\n- action={action_name}\n- message={action_message}\n\n"
@@ -607,6 +638,7 @@ def run_peer_handoff(
 
     trace: list[TraceEvent] = []
     latest_tool_outcome: dict[str, ToolOutcome] = {}
+    latest_tool_artifacts: dict[str, ToolArtifacts] = {}
 
     def make_tool_trace_hook(agent: AgentDefinition):
         def on_tool_trace(meta: dict[str, Any]) -> None:
@@ -689,11 +721,16 @@ def run_peer_handoff(
             ok = bool(meta.get("ok"))
             generated_files = meta.get("generated_files")
             files = generated_files if isinstance(generated_files, list) else []
+            output_dir = str(meta.get("output_dir") or "").strip()
             latest_tool_outcome[agent.id] = {
                 "blocked": False,
                 "failed": not ok,
                 "ok": ok,
                 "message": _sanitize_action_message(str(meta.get("error") or "").strip()),
+            }
+            latest_tool_artifacts[agent.id] = {
+                "output_dir": output_dir,
+                "generated_files": [str(item).strip() for item in files if str(item).strip()],
             }
             detail = f"{agent.name} finished {tool_name} ({'success' if ok else 'failed'})."
             attempt_count = int(meta.get("attempt_count") or 1)
@@ -809,11 +846,13 @@ def run_peer_handoff(
             )
 
             available_outputs = _available_outputs_block(list(state.get("reports", [])))
+            workspace_context = _workspace_context_text(state)
             execution_input = _build_peer_execution_prompt(
                 user_input=state["user_input"],
                 current_task_title=str(state.get("current_task_title", state["user_input"])),
                 peer_directory=_peer_directory(workers, worker.id),
                 available_outputs=available_outputs,
+                workspace_context=workspace_context,
             )
             execution_result = llm_gateway.run_agent(
                 worker,
@@ -839,6 +878,7 @@ def run_peer_handoff(
                 current_task_title=str(state.get("current_task_title", state["user_input"])),
                 peer_directory=_peer_directory(workers, worker.id),
                 available_outputs=available_outputs,
+                workspace_context=workspace_context,
                 execution_result=execution_result,
             )
             raw_response = llm_gateway.run_agent(
@@ -897,6 +937,16 @@ def run_peer_handoff(
                 action["message"] = action_message
 
             reports = list(state.get("reports", []))
+            artifacts = latest_tool_artifacts.get(worker.id, {})
+            confirmed_workspace = str(state.get("confirmed_workspace") or "").strip()
+            new_output_dir = str(artifacts.get("output_dir") or "").strip()
+            if new_output_dir:
+                confirmed_workspace = new_output_dir
+            confirmed_paths = [str(item).strip() for item in (state.get("confirmed_paths") or []) if str(item).strip()]
+            for path in artifacts.get("generated_files") or []:
+                path_text = str(path).strip()
+                if path_text and path_text not in confirmed_paths:
+                    confirmed_paths.append(path_text)
             reports.append(
                 f"{worker.name} execution on '{state.get('current_task_title', user_input)}':\n{execution_result}"
             )
@@ -931,6 +981,8 @@ def run_peer_handoff(
                 "reports": reports,
                 "last_worker_id": worker.id,
                 "last_worker_name": worker.name,
+                "confirmed_workspace": confirmed_workspace,
+                "confirmed_paths": confirmed_paths,
                 "pending_action": action_name,
                 "pending_target_agent_id": str(action.get("target_agent_id") or "").strip(),
                 "pending_task_title": str(action.get("task_title") or "").strip(),
