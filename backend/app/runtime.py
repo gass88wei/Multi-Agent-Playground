@@ -989,11 +989,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_list_directory",
-                "description": "List files and directories in the workspace.",
+                "description": "List files and directories under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Directory path, relative to workspace."},
+                        "path": {"type": "string", "description": "Directory path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "recursive": {"type": "boolean"},
                         "include_hidden": {"type": "boolean"},
                         "max_entries": {"type": "integer", "minimum": 1, "maximum": 1000},
@@ -1003,11 +1003,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_read_file",
-                "description": "Read a text file from the workspace.",
+                "description": "Read a text file under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "path": {"type": "string", "description": "File path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "start_line": {"type": "integer", "minimum": 1},
                         "end_line": {"type": "integer", "minimum": 1},
                         "max_chars": {"type": "integer", "minimum": 500, "maximum": 40000},
@@ -1018,11 +1018,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_write_file",
-                "description": "Write text content to a file in the workspace.",
+                "description": "Write text content to a file under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "path": {"type": "string", "description": "File path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "content": {"type": "string"},
                         "overwrite": {"type": "boolean"},
                     },
@@ -1032,11 +1032,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_append_file",
-                "description": "Append text content to a file in the workspace.",
+                "description": "Append text content to a file under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "File path, relative to workspace."},
+                        "path": {"type": "string", "description": "File path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "content": {"type": "string"},
                     },
                     "required": ["path", "content"],
@@ -1045,11 +1045,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_make_directory",
-                "description": "Create a directory in the workspace.",
+                "description": "Create a directory under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Directory path, relative to workspace."},
+                        "path": {"type": "string", "description": "Directory path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                     },
                     "required": ["path"],
                 },
@@ -1057,11 +1057,11 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_delete_path",
-                "description": "Delete a file or directory from the workspace.",
+                "description": "Delete a file or directory under allowed filesystem roots. Prefer an absolute path when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Target path, relative to workspace."},
+                        "path": {"type": "string", "description": "Target path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "recursive": {"type": "boolean"},
                     },
                     "required": ["path"],
@@ -1070,12 +1070,12 @@ class LLMGateway:
             {
                 **base,
                 "name": "fs_move_path",
-                "description": "Move or rename a file or directory in the workspace.",
+                "description": "Move or rename a file or directory under allowed filesystem roots. Prefer absolute paths when the workflow or user has specified a delivery/work directory.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "source_path": {"type": "string"},
-                        "destination_path": {"type": "string"},
+                        "source_path": {"type": "string", "description": "Source path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
+                        "destination_path": {"type": "string", "description": "Destination path. Prefer an absolute path under allowed roots when a delivery/work directory is known; use a relative path only for repository-local work."},
                         "overwrite": {"type": "boolean"},
                     },
                     "required": ["source_path", "destination_path"],

@@ -648,6 +648,32 @@ def _peer_exec_node_id(agent_id: str) -> str:
     return f"{PEER_EXEC_PREFIX}{agent_id}"
 
 
+def _build_first_owner_routing_input(
+    *,
+    user_input: str,
+    workers: list[AgentDefinition],
+    confirmed_workspace: str,
+) -> str:
+    worker_lines = "\n".join(
+        f"- name={worker.name}; description={worker.description}"
+        for worker in workers
+    ) or "(no peers)"
+    workspace_line = confirmed_workspace or "(not confirmed yet)"
+    return (
+        "This routing decision is for the FIRST owner in a peer collaboration workflow.\n"
+        "Choose the specialist who should own the first stage of work, not necessarily the one who could single-handedly finish the whole request fastest.\n"
+        "If the request naturally spans product, design, and engineering, prefer a first owner who can clarify, structure, or de-risk the work before final implementation.\n"
+        "If the request is already implementation-ready and does not materially benefit from upstream clarification or design work, choose the implementation-oriented owner.\n\n"
+        f"Original user request:\n{user_input}\n\n"
+        f"Confirmed delivery/workspace path:\n{workspace_line}\n\n"
+        "Current collaboration stage:\n"
+        "- first owner selection\n"
+        "- no peer outputs yet\n"
+        "- no completed artifacts confirmed yet\n\n"
+        f"Available peers:\n{worker_lines}"
+    )
+
+
 def _compile_peer_handoff_app(
     workflow: WorkflowDefinition,
     workers: list[AgentDefinition],
@@ -910,7 +936,12 @@ def run_peer_handoff(
                 node_id=ROUTER_NODE,
             ),
         )
-        routed_worker_id, route_reason = llm_gateway.route(state["user_input"], workers)
+        routing_input = _build_first_owner_routing_input(
+            user_input=state["user_input"],
+            workers=workers,
+            confirmed_workspace=str(state.get("confirmed_workspace") or "").strip(),
+        )
+        routed_worker_id, route_reason = llm_gateway.route(routing_input, workers)
         first_worker = worker_by_id[routed_worker_id]
         push(
             trace,
