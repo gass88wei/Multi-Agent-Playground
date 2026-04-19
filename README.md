@@ -1,76 +1,94 @@
 # Multi-Agent Playground
 
-This repo is now self-contained at:
+一个多智能体协作流本地 Playground。
 
-`C:\Users\zhang\MySpace\study\dev\ai\Multi-Agent-Playground`
+## 项目结构
 
-## Runtime layout
-
-- Python venv: `.\backend\.venv`
-- Env file: `.\.env`
-- Backend: `.\backend`
-- Frontend: `.\frontend`
-
-Backend config is loaded from the project root `.env` only.
-
-## Quick setup (Windows, no PowerShell scripts)
-
-```powershell
-cd C:\Users\zhang\MySpace\study\dev\ai\Multi-Agent-Playground
-C:\Users\zhang\AppData\Local\Programs\Python\Python312\python.exe -m venv .\backend\.venv
-.\backend\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\backend\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
+```
+Multi-Agent-Playground/
+├── backend/          # Python FastAPI 后端
+│   ├── app/         # 应用代码
+│   │   └── workflows/  # 基于Langgraph 5 种工作流实现
+│   ├── skills/      # 已安装的技能
+│   ├── .venv/       # Python 虚拟环境
+│   └── requirements.txt
+├── frontend/         # Vue 3 前端
+│   └── src/
+├── desktop/         # Electron 桌面端打包
+└── .env             # 根目录配置文件（后端从这里读取配置）
 ```
 
-Then configure:
+## 快速开始
 
-```text
-.\.env
+### 1. 配置环境变量
+
+```bash
+cp .env.example .env
 ```
 
-At minimum, set `OPENAI_API_KEY`.
+编辑 `.env`，至少需要设置：
 
-## Start services
-
-Backend:
-
-```powershell
-cd .\backend
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011 --reload
+```
+OPENAI_API_KEY=sk-...
 ```
 
-Frontend:
-
-```powershell
-cd .\frontend
-npm run dev
-```
-
-Frontend proxy default target is `http://127.0.0.1:8011`.
-
-## Desktop Packaging
-
-This repo now supports a desktop distribution path while preserving the normal dev workflow above.
-
-Desktop packaging overview:
-
-1. Build frontend static assets from `frontend/`
-2. Build a standalone backend executable from `backend/` via PyInstaller
-3. Package both into an Electron app from `desktop/`
-
-Prerequisites for packaging:
-
-- Frontend dependencies installed in `frontend/node_modules`
-- Backend venv installed in `backend/.venv`
-- Desktop packaging dependencies installed in `desktop/node_modules`
-- `pyinstaller` installed in the backend venv:
+### 2. 后端
 
 ```bash
 cd backend
-./.venv/bin/python -m pip install -r requirements-desktop.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-macOS packaging:
+### 3. 前端
+
+```bash
+cd frontend
+npm install
+```
+
+## 启动服务
+
+**后端**（端口 8011）：
+
+```bash
+cd backend
+source .venv/bin/activate
+uvicorn app.main:app --host 127.0.0.1 --port 8011 --reload
+```
+
+**前端**（代理到 `http://127.0.0.1:8011`）：
+
+```bash
+cd frontend
+npm run dev
+```
+
+## 工作流类型
+
+| 类型 | 说明                          |
+|------|-----------------------------|
+| `single_agent_chat` | 单智能体对话，可选最终合成器              |
+| `router_specialists` | 路由器选择最佳专家智能体                |
+| `planner_executor` | 规划器 → 验证器 → 分发器 → 执行器 → 合成器 |
+| `supervisor_dynamic` | 监督者动态分配任务                   |
+| `peer_handoff` | 智能体相互交接                     |
+
+## 桌面端打包
+
+将应用打包成独立的 Electron 桌面端（后端通过 PyInstaller 打包）。
+
+前置条件：
+
+```bash
+# 在后端 venv 中安装 PyInstaller
+cd backend
+source .venv/bin/activate
+pip install -r requirements-desktop.txt
+```
+
+**macOS**（本地未签名构建）：
 
 ```bash
 cd desktop
@@ -78,16 +96,14 @@ npm install
 npm run dist:mac
 ```
 
-The default macOS packaging command above disables code signing auto-discovery so local test builds do not fail on Apple timestamp service issues.
-
-If you want a signed macOS release build and already have signing configured on this machine:
+**macOS**（签名发布构建）：
 
 ```bash
 cd desktop
 npm run dist:mac:signed
 ```
 
-Windows packaging:
+**Windows**：
 
 ```bash
 cd desktop
@@ -95,11 +111,10 @@ npm install
 npm run dist:win
 ```
 
-Build artifacts are generated locally and should be uploaded to GitHub Releases manually in the first phase.
+构建产物输出到 `desktop/release/`。
 
-## Notes
+## 注意事项
 
-- Use Python from `.\backend\.venv\Scripts\python.exe`.
-- If `.\.env` does not exist, copy from `.\.env.example`.
-- Backend dependencies are in `.\backend\requirements.txt`.
-- Desktop packaging config lives in `./desktop`.
+- 后端配置只能从项目根目录的 `.env` 读取
+- 技能（Skills）存放在 `backend/skills/`
+- SQLite 数据库位于 `backend/data/playground.db`

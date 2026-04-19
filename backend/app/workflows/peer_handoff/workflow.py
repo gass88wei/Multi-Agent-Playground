@@ -9,9 +9,9 @@ from typing import Any, TypedDict
 from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
 
-from ..runtime import llm_gateway
-from ..settings_bridge import settings
-from ..schemas import (
+from ...runtime import llm_gateway, call_llm
+from ...settings_bridge import settings
+from ...schemas import (
     AgentDefinition,
     RunArtifacts,
     TraceEvent,
@@ -21,7 +21,15 @@ from ..schemas import (
     WorkflowNode,
     WorkflowRunResponse,
 )
-from ..store import InMemoryPlaygroundStore
+from ...store import InMemoryPlaygroundStore
+from .prompts import (
+    _build_peer_execution_prompt,
+    _build_peer_decision_prompt,
+    build_finalize_prompt,
+    build_fallback_response,
+    build_router_prompt,
+    fallback_route_keyword,
+)
 
 
 ROUTER_NODE = "first_owner_router"
@@ -941,7 +949,22 @@ def run_peer_handoff(
             workers=workers,
             confirmed_workspace=str(state.get("confirmed_workspace") or "").strip(),
         )
-        routed_worker_id, route_reason = llm_gateway.route(routing_input, workers)
+        # Use local router prompt instead of llm_gateway.route()
+        try:
+            prompt = build_router_prompt(routing_input, workers)
+            response = call_llm(prompt, temperature=0)
+            parts = response.split("|", 1)
+            routed_worker_id = parts[0].strip()
+            route_reason = parts[1].strip() if len(parts) > 1 else "模型未返回解释，使用默认解释。"
+            if routed_worker_id not in worker_by_id:
+                raise ValueError(f"Worker {routed_worker_id} not found")
+        except Exception:
+            fallback_result = fallback_route_keyword(routing_input, workers)
+            if fallback_result:
+                routed_worker_id, route_reason = fallback_result
+            else:
+                routed_worker_id = workers[0].id
+                route_reason = "fallback: default to first worker"
         first_worker = worker_by_id[routed_worker_id]
         push(
             trace,
@@ -1334,11 +1357,19 @@ def run_peer_handoff(
         specialist_answer = combined_report
         if assistant_message:
             specialist_answer = f"{combined_report}\n\nDirect user-ready answer:\n{assistant_message}".strip()
-        assistant_message = llm_gateway.finalize(
-            user_input=user_input,
-            agent=finalizer_worker,
-            specialist_answer=specialist_answer or assistant_message or "No specialist output was produced.",
-        )
+        # Use local finalize prompt instead of llm_gateway.finalize()
+        try:
+            prompt = build_finalize_prompt(
+                user_input=user_input,
+                agent=finalizer_worker,
+                specialist_answer=specialist_answer or assistant_message or "No specialist output was produced.",
+            )
+            assistant_message = call_llm(prompt, temperature=0)
+        except Exception:
+            assistant_message = build_fallback_response(
+                agent_name=finalizer_worker.name,
+                answer=specialist_answer or assistant_message or "No specialist output was produced.",
+            )
         push(
             trace,
             event(

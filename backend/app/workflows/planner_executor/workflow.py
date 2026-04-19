@@ -6,8 +6,8 @@ from typing import Any, TypedDict
 from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
 
-from ..runtime import llm_gateway
-from ..schemas import (
+from ...runtime import call_llm, llm_gateway
+from ...schemas import (
     AgentDefinition,
     RunArtifacts,
     TraceEvent,
@@ -15,8 +15,17 @@ from ..schemas import (
     WorkflowGraph,
     WorkflowRunResponse,
 )
-from ..store import InMemoryPlaygroundStore
-from .langgraph_adapter import workflow_graph_from_compiled
+from ...store import InMemoryPlaygroundStore
+from ..langgraph_adapter import workflow_graph_from_compiled
+from .prompts import (
+    build_plan_tasks_prompt,
+    build_router_prompt,
+    build_finalize_prompt,
+    build_fallback_response,
+    fallback_plan_tasks,
+    fallback_route_keyword,
+    should_force_multi,
+)
 
 
 PLANNER_NODE = "planner_core"
@@ -51,7 +60,7 @@ def event(
 
 
 def _extract_tasks(user_input: str, max_tasks: int = 4) -> list[str]:
-    return llm_gateway._fallback_plan_tasks(user_input, max_tasks=max_tasks)  # type: ignore[attr-defined]
+    return fallback_plan_tasks(user_input, max_tasks=max_tasks)
 
 
 def _needs_replan(user_input: str, tasks: list[str]) -> bool:
@@ -350,14 +359,32 @@ def run_planner_executor(
             ),
         )
 
-        tasks, plan_source = llm_gateway.plan_tasks(
-            state["user_input"],
-            max_tasks=4,
-            force_multi=is_replan,
-            agents=workers,
-        )
+        # Use local planner prompt instead of llm_gateway.plan_tasks()
+        try:
+            prompt = build_plan_tasks_prompt(
+                state["user_input"],
+                max_tasks=4,
+                force_multi=is_replan,
+                agents=workers,
+            )
+            response = call_llm(prompt, temperature=0)
+            import json
+            import re
+            # Try to extract JSON array from response
+            match = re.search(r'\[.*\]', response, re.DOTALL)
+            if match:
+                tasks = json.loads(match.group())
+                if isinstance(tasks, list) and tasks:
+                    plan_source = "llm"
+                else:
+                    tasks = []
+            else:
+                tasks = []
+        except Exception:
+            tasks = []
+        
         if not tasks:
-            tasks = _extract_tasks(state["user_input"])
+            tasks = fallback_plan_tasks(state["user_input"])
             plan_source = "rule"
 
         if is_replan and len(tasks) < 2:
@@ -503,7 +530,22 @@ def run_planner_executor(
                 task_index=human_index,
             ),
         )
-        routed_worker_id, route_reason = llm_gateway.route(task, workers)
+        # Use local router prompt instead of llm_gateway.route()
+        try:
+            prompt = build_router_prompt(task, workers)
+            response = call_llm(prompt, temperature=0)
+            parts = response.split("|", 1)
+            routed_worker_id = parts[0].strip()
+            route_reason = parts[1].strip() if len(parts) > 1 else "模型未返回解释，使用默认解释。"
+            if routed_worker_id not in worker_by_id:
+                raise ValueError(f"Worker {routed_worker_id} not found")
+        except Exception:
+            fallback_result = fallback_route_keyword(task, workers)
+            if fallback_result:
+                routed_worker_id, route_reason = fallback_result
+            else:
+                routed_worker_id = workers[0].id
+                route_reason = "fallback: default to first worker"
         worker = worker_by_id[routed_worker_id]
         push(
             trace,
@@ -655,11 +697,19 @@ def run_planner_executor(
         )
         combined_report = state.get("combined_report", "")
         finalizer_worker = worker_by_id.get(state.get("current_worker_id", ""), workers[0])
-        assistant_message = llm_gateway.finalize(
-            user_input=state["user_input"],
-            agent=finalizer_worker,
-            specialist_answer=combined_report,
-        )
+        # Use local finalize prompt instead of llm_gateway.finalize()
+        try:
+            prompt = build_finalize_prompt(
+                user_input=state["user_input"],
+                agent=finalizer_worker,
+                specialist_answer=combined_report,
+            )
+            assistant_message = call_llm(prompt, temperature=0)
+        except Exception:
+            assistant_message = build_fallback_response(
+                agent_name=finalizer_worker.name,
+                answer=combined_report,
+            )
         push(
             trace,
             event(

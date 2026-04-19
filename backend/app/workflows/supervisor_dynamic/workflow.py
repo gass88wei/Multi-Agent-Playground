@@ -7,8 +7,8 @@ from typing import Any, TypedDict
 from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
 
-from ..runtime import llm_gateway
-from ..schemas import (
+from ...runtime import call_llm, llm_gateway
+from ...schemas import (
     AgentDefinition,
     RunArtifacts,
     TraceEvent,
@@ -16,8 +16,16 @@ from ..schemas import (
     WorkflowGraph,
     WorkflowRunResponse,
 )
-from ..store import InMemoryPlaygroundStore
-from .langgraph_adapter import workflow_graph_from_compiled
+from ...store import InMemoryPlaygroundStore
+from ..langgraph_adapter import workflow_graph_from_compiled
+from .prompts import (
+    build_router_prompt,
+    build_supervisor_review_prompt,
+    build_finalize_prompt,
+    build_fallback_response,
+    fallback_route_keyword,
+    fallback_supervisor_review_decision,
+)
 
 
 INTAKE_NODE = "supervisor_intake"
@@ -446,7 +454,22 @@ def run_supervisor_dynamic(
             "After those concerns are covered, prefer the specialist who closes the biggest remaining gap. "
             "If the current task requires creating or modifying files, prefer a worker responsible for implementation or delivery."
         )
-        routed_worker_id, route_reason = llm_gateway.route(routing_input, workers)
+        # Use local router prompt instead of llm_gateway.route()
+        try:
+            prompt = build_router_prompt(routing_input, workers)
+            response = call_llm(prompt, temperature=0)
+            parts = response.split("|", 1)
+            routed_worker_id = parts[0].strip()
+            route_reason = parts[1].strip() if len(parts) > 1 else "模型未返回解释，使用默认解释。"
+            if routed_worker_id not in worker_by_id:
+                raise ValueError(f"Worker {routed_worker_id} not found")
+        except Exception:
+            fallback_result = fallback_route_keyword(routing_input, workers)
+            if fallback_result:
+                routed_worker_id, route_reason = fallback_result
+            else:
+                routed_worker_id = workers[0].id
+                route_reason = "fallback: default to first worker"
         worker = worker_by_id[routed_worker_id]
         push(
             trace,
@@ -634,12 +657,30 @@ def run_supervisor_dynamic(
                 + "If another specialist can materially improve the result before completion, prefer continuing with a concrete next focus task instead of ending early."
             ),
         ]
-        should_continue, next_focus_task, review_reason = llm_gateway.supervisor_review_decision(
-            user_input=state["user_input"],
-            reports=review_reports,
-            cycle=cycle,
-            max_cycles=max_cycles,
-        )
+        # Use local supervisor review prompt instead of llm_gateway.supervisor_review_decision()
+        try:
+            prompt = build_supervisor_review_prompt(
+                user_input=state["user_input"],
+                reports=review_reports,
+                cycle=cycle,
+                max_cycles=max_cycles,
+            )
+            response = call_llm(prompt, temperature=0)
+            import json
+            parsed = json.loads(response)
+            should_continue = bool(parsed.get("continue", False))
+            next_focus_task = str(parsed.get("next_focus_task", ""))
+            review_reason = str(parsed.get("reason", "Supervisor decision from model."))
+            if should_continue and not next_focus_task.strip():
+                next_focus_task = "Refine missing constraints, risks, and acceptance criteria."
+        except Exception as error:
+            should_continue, next_focus_task, review_reason = fallback_supervisor_review_decision(
+                user_input=state["user_input"],
+                reports=review_reports,
+                cycle=cycle,
+                max_cycles=max_cycles,
+            )
+            review_reason = f"{review_reason} (fallback due to: {error})"
 
         if should_continue:
             push(
@@ -735,11 +776,19 @@ def run_supervisor_dynamic(
             "Tool evidence:\n"
             f"{evidence_block}"
         ).strip()
-        assistant_message = llm_gateway.finalize(
-            user_input=state["user_input"],
-            agent=finalizer_worker,
-            specialist_answer=specialist_answer,
-        )
+        # Use local finalize prompt instead of llm_gateway.finalize()
+        try:
+            prompt = build_finalize_prompt(
+                user_input=state["user_input"],
+                agent=finalizer_worker,
+                specialist_answer=specialist_answer,
+            )
+            assistant_message = call_llm(prompt, temperature=0)
+        except Exception:
+            assistant_message = build_fallback_response(
+                agent_name=finalizer_worker.name,
+                answer=specialist_answer,
+            )
         push(
             trace,
             event(

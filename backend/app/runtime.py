@@ -3614,4 +3614,23 @@ class LLMGateway:
         return False, "", "Fallback: no strong signal to continue."
 
 
+# Simple LLM call function - used by workflows with self-contained prompts
+def call_llm(
+    prompt: str,
+    temperature: float = 0,
+    model: str | None = None,
+) -> str:
+    """Simple LLM call for workflows with self-contained prompts."""
+    gateway = LLMGateway()
+    if not gateway.api_configured or gateway.client is None:
+        raise RuntimeError("OpenAI API not configured")
+    
+    response = gateway.client.chat.completions.create(
+        model=model or settings.OPENAI_MODEL,
+        temperature=temperature,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
 llm_gateway = LLMGateway()

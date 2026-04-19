@@ -37,11 +37,11 @@ from .settings_bridge import (
 )
 from .skillhub_client import skillhub_client
 from .store import store
-from .workflows.planner_executor import build_planner_graph, run_planner_executor
-from .workflows.peer_handoff import build_peer_handoff_graph, run_peer_handoff
-from .workflows.router_specialists import build_router_graph, run_router_specialists
-from .workflows.single_agent_chat import build_single_agent_graph, run_single_agent_chat
-from .workflows.supervisor_dynamic import build_supervisor_graph, run_supervisor_dynamic
+from .workflows.planner_executor.workflow import build_planner_graph, run_planner_executor
+from .workflows.peer_handoff.workflow import build_peer_handoff_graph, run_peer_handoff
+from .workflows.router_specialists.workflow import build_router_graph, run_router_specialists
+from .workflows.single_agent_chat.workflow import build_single_agent_graph, run_single_agent_chat
+from .workflows.supervisor_dynamic.workflow import build_supervisor_graph, run_supervisor_dynamic
 
 
 router = APIRouter(prefix="/api")

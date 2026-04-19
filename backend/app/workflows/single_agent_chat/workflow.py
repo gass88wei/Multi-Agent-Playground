@@ -6,8 +6,8 @@ from typing import Any, TypedDict
 from fastapi import HTTPException
 from langgraph.graph import END, START, StateGraph
 
-from ..runtime import llm_gateway
-from ..schemas import (
+from ...runtime import call_llm, llm_gateway
+from ...schemas import (
     AgentDefinition,
     RunArtifacts,
     TraceEvent,
@@ -15,19 +15,17 @@ from ..schemas import (
     WorkflowGraph,
     WorkflowRunResponse,
 )
-from ..store import InMemoryPlaygroundStore
-from .langgraph_adapter import workflow_graph_from_compiled
+from ...store import InMemoryPlaygroundStore
+from ..langgraph_adapter import workflow_graph_from_compiled
+from .prompts import build_finalize_prompt, build_fallback_response
 
 
-ROUTER_NODE = "router"
+AGENT_NODE = "single_agent"
 FINALIZER_NODE = "finalize"
 
 
-class RouterState(TypedDict, total=False):
+class SingleAgentState(TypedDict, total=False):
     user_input: str
-    selected_agent_id: str
-    selected_agent_name: str
-    route_reason: str
     specialist_answer: str
     assistant_message: str
 
@@ -41,101 +39,73 @@ def event(
     return TraceEvent(type=event_type, title=title, detail=detail, payload=payload)
 
 
-def _compile_router_app(
+def _compile_single_agent_app(
     workflow: WorkflowDefinition,
-    agents: list[AgentDefinition],
-    router_node: Callable[[RouterState], RouterState],
-    make_specialist_node: Callable[[AgentDefinition], Callable[[RouterState], RouterState]],
-    route_next: Callable[[RouterState], str],
-    finalizer_node: Callable[[RouterState], RouterState] | None = None,
+    agent: AgentDefinition,
+    agent_node: Callable[[SingleAgentState], SingleAgentState],
+    finalizer_node: Callable[[SingleAgentState], SingleAgentState] | None = None,
 ):
-    builder = StateGraph(RouterState)
-    builder.add_node(ROUTER_NODE, router_node, metadata={"kind": "logic", "label": "Router"})
-    for agent in agents:
-        builder.add_node(
-            agent.id,
-            make_specialist_node(agent),
-            metadata={"kind": "agent", "label": agent.name},
-        )
-    if workflow.finalizer_enabled and finalizer_node is not None:
-        builder.add_node(FINALIZER_NODE, finalizer_node, metadata={"kind": "final", "label": "Finalizer"})
-
-    builder.add_edge(START, ROUTER_NODE)
-    builder.add_conditional_edges(
-        ROUTER_NODE,
-        route_next,
-        {agent.id: agent.id for agent in agents},
+    builder = StateGraph(SingleAgentState)
+    builder.add_node(
+        AGENT_NODE,
+        agent_node,
+        metadata={"kind": "agent", "label": agent.name},
     )
-
-    for agent in agents:
-        if workflow.finalizer_enabled and finalizer_node is not None:
-            builder.add_edge(agent.id, FINALIZER_NODE)
-        else:
-            builder.add_edge(agent.id, END)
-
     if workflow.finalizer_enabled and finalizer_node is not None:
+        builder.add_node(
+            FINALIZER_NODE,
+            finalizer_node,
+            metadata={"kind": "final", "label": "Finalizer"},
+        )
+
+    builder.add_edge(START, AGENT_NODE)
+    if workflow.finalizer_enabled and finalizer_node is not None:
+        builder.add_edge(AGENT_NODE, FINALIZER_NODE)
         builder.add_edge(FINALIZER_NODE, END)
+    else:
+        builder.add_edge(AGENT_NODE, END)
 
     return builder.compile()
 
 
-def build_router_graph(
+def build_single_agent_graph(
     workflow: WorkflowDefinition,
     agents: list[AgentDefinition],
 ) -> WorkflowGraph:
     if not agents:
-        raise HTTPException(status_code=400, detail="router_specialists requires at least 1 agent.")
+        raise HTTPException(status_code=400, detail="single_agent_chat requires at least 1 agent.")
+    agent = agents[0]
 
-    default_agent = agents[0]
-
-    def noop_router(_: RouterState) -> RouterState:
-        return {
-            "selected_agent_id": default_agent.id,
-            "selected_agent_name": default_agent.name,
-            "route_reason": "graph_preview",
-        }
-
-    def make_noop_specialist(_: AgentDefinition):
-        def specialist(_: RouterState) -> RouterState:
-            return {}
-
-        return specialist
-
-    def route_next(state: RouterState) -> str:
-        selected = str(state.get("selected_agent_id", ""))
-        return selected if selected else default_agent.id
-
-    def noop_finalizer(_: RouterState) -> RouterState:
+    def noop_agent(_: SingleAgentState) -> SingleAgentState:
         return {}
 
-    app = _compile_router_app(
+    def noop_finalizer(_: SingleAgentState) -> SingleAgentState:
+        return {}
+
+    app = _compile_single_agent_app(
         workflow,
-        agents,
-        router_node=noop_router,
-        make_specialist_node=make_noop_specialist,
-        route_next=route_next,
+        agent,
+        agent_node=noop_agent,
         finalizer_node=noop_finalizer if workflow.finalizer_enabled else None,
     )
     return workflow_graph_from_compiled(app)
 
 
-def run_router_specialists(
+def run_single_agent_chat(
     store: InMemoryPlaygroundStore,
     workflow: WorkflowDefinition,
     user_input: str,
     history: list[dict[str, str]] | None = None,
     on_event: Callable[[TraceEvent], None] | None = None,
 ) -> WorkflowRunResponse:
-    agents: list[AgentDefinition] = []
+    agent: AgentDefinition | None = None
     for agent_id in workflow.specialist_agent_ids:
-        agent = store.get_agent(agent_id)
-        if agent is not None:
-            agents.append(agent)
-
-    if not agents:
-        raise HTTPException(status_code=400, detail="This workflow has no valid specialist agents.")
-
-    agent_by_id = {agent.id: agent for agent in agents}
+        resolved = store.get_agent(agent_id)
+        if resolved is not None:
+            agent = resolved
+            break
+    if agent is None:
+        raise HTTPException(status_code=400, detail="single_agent_chat requires 1 valid agent.")
 
     def push(trace: list[TraceEvent], item: TraceEvent) -> None:
         trace.append(item)
@@ -143,7 +113,6 @@ def run_router_specialists(
             on_event(item)
 
     trace: list[TraceEvent] = []
-
     def make_tool_trace_hook(agent: AgentDefinition):
         def on_tool_trace(meta: dict[str, Any]) -> None:
             stage = str(meta.get("stage") or "")
@@ -156,7 +125,7 @@ def run_router_specialists(
                         "state_updated",
                         "Tool Started",
                         f"{agent.name} is running {tool_name}.",
-                        node_id=agent.id,
+                        node_id=AGENT_NODE,
                         agent_id=agent.id,
                         tool_name=tool_name,
                         tool_call_id=meta.get("tool_call_id"),
@@ -177,7 +146,7 @@ def run_router_specialists(
                         "state_updated",
                         "Tool Retry",
                         f"{tool_name} attempt {attempt}/{max_attempts} failed: {reason[:120]}",
-                        node_id=agent.id,
+                        node_id=AGENT_NODE,
                         agent_id=agent.id,
                         tool_name=tool_name,
                         tool_call_id=meta.get("tool_call_id"),
@@ -198,7 +167,7 @@ def run_router_specialists(
                         "state_updated",
                         "Tool Unavailable",
                         reason[:220],
-                        node_id=agent.id,
+                        node_id=AGENT_NODE,
                         agent_id=agent.id,
                         tool_name=tool_name,
                         tool_call_id=meta.get("tool_call_id"),
@@ -218,10 +187,6 @@ def run_router_specialists(
             generated_files = meta.get("generated_files")
             files = generated_files if isinstance(generated_files, list) else []
             detail = f"{agent.name} finished {tool_name} ({'success' if ok else 'failed'})."
-            attempt_count = int(meta.get("attempt_count") or 1)
-            max_attempts = int(meta.get("max_attempts") or 1)
-            if max_attempts > 1:
-                detail += f" Attempts {attempt_count}/{max_attempts}."
             if ok and files:
                 detail += f" Generated {len(files)} file(s)."
             if (not ok) and meta.get("error"):
@@ -232,33 +197,16 @@ def run_router_specialists(
                     "state_updated",
                     "Tool Finished" if ok else "Tool Failed",
                     detail,
-                    node_id=agent.id,
+                    node_id=AGENT_NODE,
                     agent_id=agent.id,
                     tool_name=tool_name,
                     tool_call_id=meta.get("tool_call_id"),
                     ok=ok,
                     duration_ms=meta.get("duration_ms"),
-                    attempt_count=attempt_count,
-                    max_attempts=max_attempts,
                     output_dir=meta.get("output_dir"),
                     generated_files=files,
                 ),
             )
-
-            result_preview = str(meta.get("result_preview") or "").strip()
-            if result_preview:
-                push(
-                    trace,
-                    event(
-                        "message_generated",
-                        "Tool Output",
-                        f"{tool_name} produced output.",
-                        node_id=agent.id,
-                        agent_id=agent.id,
-                        tool_name=tool_name,
-                        preview=result_preview[:180],
-                    ),
-                )
 
         return on_tool_trace
 
@@ -273,93 +221,47 @@ def run_router_specialists(
         ),
     )
 
-    def router_node(state: RouterState) -> RouterState:
+    def agent_node(state: SingleAgentState) -> SingleAgentState:
         push(
             trace,
             event(
                 "node_entered",
-                "Enter Router",
-                "Router is selecting the best specialist.",
-                node_id=ROUTER_NODE,
+                "Enter Agent",
+                f"{agent.name} is generating the response.",
+                node_id=AGENT_NODE,
+                agent_id=agent.id,
             ),
         )
-        route_agent_id, route_reason = llm_gateway.route(state["user_input"], agents)
-        selected_agent = agent_by_id[route_agent_id]
+        specialist_answer = llm_gateway.run_agent(
+            agent,
+            state["user_input"],
+            history=history,
+            trace_hook=make_tool_trace_hook(agent),
+        )
         push(
             trace,
             event(
-                "route_selected",
-                "Route Selected",
-                f"Router selected {selected_agent.name}",
-                node_id=ROUTER_NODE,
-                next_node_id=selected_agent.id,
-                reason=route_reason,
+                "message_generated",
+                "Agent Output",
+                f"{agent.name} generated an answer.",
+                node_id=AGENT_NODE,
+                agent_id=agent.id,
+                preview=specialist_answer[:120],
             ),
         )
         push(
             trace,
             event(
                 "node_exited",
-                "Exit Router",
-                f"Routing finished. Next node: {selected_agent.name}",
-                node_id=ROUTER_NODE,
+                "Exit Agent",
+                f"{agent.name} finished processing.",
+                node_id=AGENT_NODE,
+                agent_id=agent.id,
             ),
         )
-        return {
-            "selected_agent_id": selected_agent.id,
-            "selected_agent_name": selected_agent.name,
-            "route_reason": route_reason,
-        }
+        return {"specialist_answer": specialist_answer}
 
-    def make_specialist_node(agent: AgentDefinition):
-        def specialist_node(state: RouterState) -> RouterState:
-            push(
-                trace,
-                event(
-                    "node_entered",
-                    "Enter Specialist",
-                    f"{agent.name} is generating the response.",
-                    node_id=agent.id,
-                    agent_id=agent.id,
-                ),
-            )
-            specialist_answer = llm_gateway.run_agent(
-                agent,
-                state["user_input"],
-                history=history,
-                trace_hook=make_tool_trace_hook(agent),
-            )
-            push(
-                trace,
-                event(
-                    "message_generated",
-                    "Specialist Output",
-                    f"{agent.name} generated an answer.",
-                    node_id=agent.id,
-                    preview=specialist_answer[:120],
-                ),
-            )
-            push(
-                trace,
-                event(
-                    "node_exited",
-                    "Exit Specialist",
-                    f"{agent.name} finished processing.",
-                    node_id=agent.id,
-                ),
-            )
-            return {"specialist_answer": specialist_answer}
-
-        return specialist_node
-
-    def route_next(state: RouterState) -> str:
-        selected = str(state.get("selected_agent_id", ""))
-        if selected in agent_by_id:
-            return selected
-        return agents[0].id
-
-    def finalizer_node(state: RouterState) -> RouterState:
-        selected_agent = agent_by_id[state["selected_agent_id"]]
+    def finalizer_node(state: SingleAgentState) -> SingleAgentState:
         push(
             trace,
             event(
@@ -369,11 +271,20 @@ def run_router_specialists(
                 node_id=FINALIZER_NODE,
             ),
         )
-        assistant_message = llm_gateway.finalize(
-            user_input=state["user_input"],
-            agent=selected_agent,
-            specialist_answer=state["specialist_answer"],
-        )
+        # Use local prompt instead of llm_gateway.finalize()
+        try:
+            prompt = build_finalize_prompt(
+                user_input=state["user_input"],
+                agent=agent,
+                specialist_answer=state["specialist_answer"],
+            )
+            assistant_message = call_llm(prompt, temperature=0)
+        except Exception:
+            # Fallback if API not configured
+            assistant_message = build_fallback_response(
+                agent_name=agent.name,
+                answer=state["specialist_answer"],
+            )
         push(
             trace,
             event(
@@ -385,12 +296,10 @@ def run_router_specialists(
         )
         return {"assistant_message": assistant_message}
 
-    app = _compile_router_app(
+    app = _compile_single_agent_app(
         workflow,
-        agents,
-        router_node=router_node,
-        make_specialist_node=make_specialist_node,
-        route_next=route_next,
+        agent,
+        agent_node=agent_node,
         finalizer_node=finalizer_node if workflow.finalizer_enabled else None,
     )
     graph = workflow_graph_from_compiled(app)
@@ -412,13 +321,10 @@ def run_router_specialists(
         ),
     )
 
-    route_agent_id = str(final_state.get("selected_agent_id", ""))
-    route_agent_name = str(final_state.get("selected_agent_name", ""))
-    route_reason = str(final_state.get("route_reason", ""))
     artifacts = RunArtifacts(
-        route_agent_id=route_agent_id or None,
-        route_agent_name=route_agent_name or None,
-        route_reason=route_reason or None,
+        route_agent_id=agent.id,
+        route_agent_name=agent.name,
+        route_reason="single_agent_chat",
         specialist_answer=specialist_answer or None,
         final_answer=assistant_message,
     )
