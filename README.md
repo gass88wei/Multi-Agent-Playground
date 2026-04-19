@@ -1,6 +1,8 @@
 # Multi-Agent Playground
 
-一个多智能体协作流本地 Playground。
+![](https://jyunpan.oss-cn-beijing.aliyuncs.com/github/0.png)
+![](https://jyunpan.oss-cn-beijing.aliyuncs.com/github/1.png)
+
 
 ## 项目结构
 
@@ -114,7 +116,5 @@ npm run dist:win
 构建产物输出到 `desktop/release/`。
 
 ## 注意事项
-
-- 后端配置只能从项目根目录的 `.env` 读取
 - 技能（Skills）存放在 `backend/skills/`
 - SQLite 数据库位于 `backend/data/playground.db`
