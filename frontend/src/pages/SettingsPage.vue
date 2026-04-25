@@ -2,7 +2,6 @@
 import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import {
   CheckCircle2,
-  ChevronUp,
   Copy,
   GripVertical,
   KeyRound,
@@ -394,11 +393,8 @@ function envValuePreview(value) {
           </div>
 
           <div v-if="editingProfileId === profile.id" class="settings-profile-editor">
-            <div class="settings-profile-editor-head">
+            <div class="settings-profile-editor-head" @click="toggleEditProfile(profile.id)">
               <strong>{{ t("settings.editProfile") }}</strong>
-              <button type="button" class="settings-profile-collapse" @click="toggleEditProfile(profile.id)">
-                <ChevronUp :size="16" />
-              </button>
             </div>
 
             <div class="settings-form-grid">

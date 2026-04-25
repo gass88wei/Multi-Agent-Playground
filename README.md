@@ -57,7 +57,7 @@ npm install
 ```bash
 cd backend
 source .venv/bin/activate
-uvicorn app.main:app --host 127.0.0.1 --port 8011 --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
 **前端**（代理到 `http://127.0.0.1:8011`）：

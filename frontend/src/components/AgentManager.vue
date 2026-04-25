@@ -624,10 +624,10 @@ function getSkillDisplay(skillId) {
               >
                 <div class="agent-modal-capability-main">
                   <component :is="capability.icon" :size="16" />
-                  <div>
-                    <strong>{{ capability.label }}</strong>
-                    <p>{{ capability.description }}</p>
-                  </div>
+                  <span class="text-sm font-bold">{{ capability.label }}</span>
+                </div>
+                <div class="agent-modal-capability-check" :class="{ visible: editingAgent.builtin_capabilities.includes(capability.id) }">
+                  <CheckCircle2 :size="18" />
                 </div>
               </button>
             </div>
