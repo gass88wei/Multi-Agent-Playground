@@ -23,6 +23,13 @@ jobs:
           python-version: '3.12'
           cache: pip
 
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
       - name: Build backend (PyInstaller)
         run: |
           cd backend
@@ -30,15 +37,18 @@ jobs:
           pip install -r requirements.txt
           python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ..\desktop\.artifacts\backend
 
-      - name: Build Electron app
+      - name: Copy frontend dist to artifacts
+        shell: bash
+        run: |
+          mkdir -p desktop/.artifacts/renderer
+          cp -r frontend/dist/* desktop/.artifacts/renderer/
+
+      - name: Install desktop deps and build Electron
         shell: bash
         run: |
           cd desktop
           npm ci
-          node scripts/prepare-artifacts.mjs
           npx electron-builder --win nsis zip
-        env:
-          AGENT_PLAYGROUND_DESKTOP_BUILD: "1"
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
