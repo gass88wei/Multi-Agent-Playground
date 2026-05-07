@@ -60,6 +60,25 @@ function removeAndRecreate(dirPath) {
 }
 
 function copyFrontendArtifacts() {
+  const frontendDistDir = path.join(frontendDir, "dist");
+  if (existsSync(frontendDistDir)) {
+    console.log("SKIP: frontend/dist already exists, skipping npm run build");
+    cpSync(frontendDistDir, rendererArtifactsDir, { recursive: true });
+    return;
+  }
+  run("npm", ["run", "build"], {
+    cwd: frontendDir,
+    env: {
+      ...process.env,
+      AGENT_PLAYGROUND_DESKTOP_BUILD: "1",
+    },
+  });
+  if (!existsSync(frontendDistDir)) {
+    throw new Error("Frontend build output not found: frontend/dist");
+  }
+  cpSync(frontendDistDir, rendererArtifactsDir, { recursive: true });
+    return;
+  }
   run("npm", ["run", "build"], {
     cwd: frontendDir,
     env: {
@@ -68,6 +87,18 @@ function copyFrontendArtifacts() {
     },
   });
   const frontendDistDir = path.join(frontendDir, "dist");
+  if (existsSync(frontendDistDir)) {
+    console.log("SKIP: frontend/dist already exists, skipping npm run build");
+    cpSync(frontendDistDir, rendererArtifactsDir, { recursive: true });
+    return;
+  }
+  run("npm", ["run", "build"], {
+    cwd: frontendDir,
+    env: {
+      ...process.env,
+      AGENT_PLAYGROUND_DESKTOP_BUILD: "1",
+    },
+  });
   if (!existsSync(frontendDistDir)) {
     throw new Error("Frontend build output not found: frontend/dist");
   }
