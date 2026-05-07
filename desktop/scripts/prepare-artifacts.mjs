@@ -14,9 +14,17 @@ const rendererArtifactsDir = path.join(artifactsDir, "renderer");
 const backendArtifactsDir = path.join(artifactsDir, "backend");
 const runtimeArtifactsDir = path.join(artifactsDir, "runtime");
 
+function resolveNpmCommand() {
+  // When running under bash on Windows (GitHub Actions `shell: bash`),
+  // `npm.cmd` breaks — prefer `npm` which bash resolves correctly.
+  if (process.platform === "win32" && process.env.SHELL) {
+    return "npm";
+  }
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
 function run(command, args, options = {}) {
-  const resolvedCommand =
-    process.platform === "win32" && command === "npm" ? "npm.cmd" : command;
+  const resolvedCommand = command === "npm" ? resolveNpmCommand() : command;
   const result = spawnSync(resolvedCommand, args, {
     stdio: "inherit",
     cwd: options.cwd || repoRoot,
@@ -28,8 +36,7 @@ function run(command, args, options = {}) {
 }
 
 function capture(command, args, options = {}) {
-  const resolvedCommand =
-    process.platform === "win32" && command === "npm" ? "npm.cmd" : command;
+  const resolvedCommand = command === "npm" ? resolveNpmCommand() : command;
   const result = spawnSync(resolvedCommand, args, {
     stdio: ["ignore", "pipe", "pipe"],
     cwd: options.cwd || repoRoot,
@@ -81,8 +88,23 @@ function resolveBundledNodeRuntime() {
     throw new Error(`Node executable not found: ${nodeBinary}`);
   }
 
-  const npmGlobalRoot = capture("npm", ["root", "-g"], { cwd: repoRoot });
-  const npmPackageDir = path.join(npmGlobalRoot, "npm");
+  // Resolve npm from Node.js installation prefix instead of `npm root -g`.
+  // `npm root -g` requires a globally installed npm package, which isn't
+  // available on CI runners. Also, resolving npm → npm.cmd on Windows
+  // runners breaks when spawnSync runs under bash (shell: bash in Actions).
+  let npmPackageDir = path.join(
+    path.dirname(path.dirname(nodeBinary)),
+    "node_modules",
+    "npm",
+  );
+  if (!existsSync(npmPackageDir)) {
+    // Fallback: try npm root -g (works locally on macOS/Linux)
+    try {
+      npmPackageDir = path.join(capture("npm", ["root", "-g"], { cwd: repoRoot }), "npm");
+    } catch {
+      // ignore
+    }
+  }
   const npmCliPath = path.join(npmPackageDir, "bin", "npm-cli.js");
   if (!existsSync(npmPackageDir) || !existsSync(npmCliPath)) {
     throw new Error(`Bundled npm package not found under: ${npmPackageDir}`);
