@@ -38,9 +38,9 @@ jobs:
           cd backend
           pip install -r requirements-desktop.txt
           pip install -r requirements.txt
-          python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ..\desktop\.artifacts\backend
+          python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ..desktop.artifactsackend
 
-      - name: Prepare artifacts (runtime only, frontend+backend already done)
+      - name: Prepare artifacts (runtime only)
         shell: bash
         run: |
           cd desktop
