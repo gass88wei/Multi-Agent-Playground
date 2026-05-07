@@ -46,7 +46,6 @@ jobs:
         run: |
           cd desktop
           npm ci
-          npm install -g npm
           node scripts/prepare-artifacts.mjs
 
       - name: Build Electron app
