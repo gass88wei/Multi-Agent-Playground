@@ -4,81 +4,56 @@ on:
   push:
     branches:
       - main
-  push_tags:
-      - "v*.*"  # trigger on v* tags (version releases)
+    tags:
+      - 'v*'
 
 jobs:
   release:
-    ifem: [starts: $github.ref_name == 'refs/tags/*']
-    run-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Setup Python
+      - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
+          cache: pip
 
-      - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
-          npm install
-      
       - name: Build frontend
         run: |
           cd frontend
+          npm ci
           npm run build
 
-      - name: Install backend dependencies
+      - name: Build backend (PyInstaller)
         run: |
           cd backend
-          python -m venv .wenv
-          source .venv/bin/activate
           pip install -r requirements-desktop.txt
           pip install -r requirements.txt
+          python -m PyInstaller desktop_entry.py \
+            --name agent-playground-backend \
+            --noconfirm --clean --onedir \
+            --distpath ../desktop/.artifacts/backend
 
-      - name: Build backend artifacts (PyInstaller)
-        run: |
-          cd backend
-          ../wenv/bin/python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ../desktop/.artifacts/backend
-
-      - name: Install desktop dependencies
+      - name: Build Electron app (Linux)
         run: |
           cd desktop
           npm ci
-          npm install
-      
-      - name: Prepare artifacts
-        run: |
-          cd desktop
           node scripts/prepare-artifacts.mjs
-      
-      - name: Build Electron app (MacOS)
-        if: runner.os == 'macos'
-        run: |
-          cd desktop
-          electron-builder --mac dmg zip
-      
-      - name: Build Electron app (Windows)
-        if: runner.os == 'windows'
-        run: |
-          cd desktop
-          electron-builder --win nsis zip
+          npx electron-builder --linux AppImage
 
-      - name: Upload release assets
-        uses: actions/upload-release-assets@v
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
         with:
-          release_tag: ${{ github.ref_name }}
-          files: |
-            desktop/release/*
-          docktags: true
-          proname: true
+          tag_name: ${{ github.ref_name }}
+          files: desktop/release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
