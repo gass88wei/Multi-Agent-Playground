@@ -14,17 +14,9 @@ const rendererArtifactsDir = path.join(artifactsDir, "renderer");
 const backendArtifactsDir = path.join(artifactsDir, "backend");
 const runtimeArtifactsDir = path.join(artifactsDir, "runtime");
 
-function resolveNpmCommand() {
-  // When running under bash on Windows (GitHub Actions `shell: bash`),
-  // `npm.cmd` breaks — prefer `npm` which bash resolves correctly.
-  if (process.platform === "win32" && process.env.SHELL) {
-    return "npm";
-  }
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
 function run(command, args, options = {}) {
-  const resolvedCommand = command === "npm" ? resolveNpmCommand() : command;
+  const resolvedCommand =
+    process.platform === "win32" && command === "npm" ? "npm.cmd" : command;
   const result = spawnSync(resolvedCommand, args, {
     stdio: "inherit",
     cwd: options.cwd || repoRoot,
@@ -36,7 +28,8 @@ function run(command, args, options = {}) {
 }
 
 function capture(command, args, options = {}) {
-  const resolvedCommand = command === "npm" ? resolveNpmCommand() : command;
+  const resolvedCommand =
+    process.platform === "win32" && command === "npm" ? "npm.cmd" : command;
   const result = spawnSync(resolvedCommand, args, {
     stdio: ["ignore", "pipe", "pipe"],
     cwd: options.cwd || repoRoot,
@@ -88,21 +81,9 @@ function resolveBundledNodeRuntime() {
     throw new Error(`Node executable not found: ${nodeBinary}`);
   }
 
-  // Use Node's module resolution to locate the bundled npm package.
-  // Avoids `npm root -g` which requires a globally installed npm and
-  // breaks with npm.cmd under bash on Windows CI runners.
-  const npmCliResult = spawnSync(
-    nodeBinary,
-    ["-e", "console.log(require.resolve('npm'))"],
-    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
-  );
-  if (npmCliResult.status !== 0) {
-    throw new Error(
-      `Failed to resolve npm via Node: ${(npmCliResult.stderr || "").trim()}`,
-    );
-  }
-  const npmCliPath = npmCliResult.stdout.trim();
-  const npmPackageDir = path.dirname(path.dirname(npmCliPath)); // up from bin/npm-cli.js
+  const npmGlobalRoot = capture("npm", ["root", "-g"], { cwd: repoRoot });
+  const npmPackageDir = path.join(npmGlobalRoot, "npm");
+  const npmCliPath = path.join(npmPackageDir, "bin", "npm-cli.js");
   if (!existsSync(npmPackageDir) || !existsSync(npmCliPath)) {
     throw new Error(`Bundled npm package not found under: ${npmPackageDir}`);
   }
