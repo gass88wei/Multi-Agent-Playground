@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,7 +39,7 @@ jobs:
           cd backend
           pip install -r requirements-desktop.txt
           pip install -r requirements.txt
-          python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ..desktop.artifactsackend
+          python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir "--distpath" ..\desktop\.artifacts\backend
 
       - name: Prepare artifacts (runtime only)
         shell: bash
