@@ -40,17 +40,17 @@ jobs:
           pip install -r requirements.txt
           python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir --distpath ..\desktop\.artifacts\backend
 
-      - name: Copy frontend dist to artifacts
-        shell: bash
-        run: |
-          mkdir -p desktop/.artifacts/renderer
-          cp -r frontend/dist/* desktop/.artifacts/renderer/
-
-      - name: Install desktop deps and build Electron
+      - name: Prepare artifacts (runtime only, frontend+backend already done)
         shell: bash
         run: |
           cd desktop
           npm ci
+          node scripts/prepare-artifacts.mjs
+
+      - name: Build Electron app
+        shell: bash
+        run: |
+          cd desktop
           npx electron-builder --win nsis zip
 
       - name: Upload Release Assets
