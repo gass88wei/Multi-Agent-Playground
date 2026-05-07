@@ -88,25 +88,21 @@ function resolveBundledNodeRuntime() {
     throw new Error(`Node executable not found: ${nodeBinary}`);
   }
 
-  // Walk up from node binary to find bundled npm.
-  // `npm root -g` requires a globally installed npm package, which isn't
-  // available on CI runners. Also, npm → npm.cmd breaks under bash on Windows.
-  let dir = path.dirname(nodeBinary); // bin/
+  // Resolve npm from Node.js install prefix, falling back to npm root -g.
+  // The walk-up handles standard Node layouts (including CI runners where
+  // npm is bundled under the Node prefix, not globally installed).
   let npmPackageDir = null;
+  let searchDir = path.dirname(nodeBinary); // bin/
   for (let i = 0; i < 5 && !npmPackageDir; i++) {
-    dir = path.dirname(dir);
-    const candidate = path.join(dir, "node_modules", "npm");
+    searchDir = path.dirname(searchDir);
+    const candidate = path.join(searchDir, "node_modules", "npm");
     if (existsSync(path.join(candidate, "bin", "npm-cli.js"))) {
       npmPackageDir = candidate;
     }
   }
   if (!npmPackageDir) {
-    // Last resort: npm root -g (works locally on macOS/Linux)
-    try {
-      npmPackageDir = path.join(capture("npm", ["root", "-g"], { cwd: repoRoot }), "npm");
-    } catch {
-      // ignore
-    }
+    // npm root -g fallback (works when npm is installed globally)
+    npmPackageDir = path.join(capture("npm", ["root", "-g"], { cwd: repoRoot }), "npm");
   }
   const npmCliPath = path.join(npmPackageDir, "bin", "npm-cli.js");
   if (!existsSync(npmPackageDir) || !existsSync(npmCliPath)) {
