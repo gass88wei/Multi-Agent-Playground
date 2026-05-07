@@ -88,17 +88,20 @@ function resolveBundledNodeRuntime() {
     throw new Error(`Node executable not found: ${nodeBinary}`);
   }
 
-  // Resolve npm from Node.js installation prefix instead of `npm root -g`.
+  // Walk up from node binary to find bundled npm.
   // `npm root -g` requires a globally installed npm package, which isn't
-  // available on CI runners. Also, resolving npm → npm.cmd on Windows
-  // runners breaks when spawnSync runs under bash (shell: bash in Actions).
-  let npmPackageDir = path.join(
-    path.dirname(path.dirname(nodeBinary)),
-    "node_modules",
-    "npm",
-  );
-  if (!existsSync(npmPackageDir)) {
-    // Fallback: try npm root -g (works locally on macOS/Linux)
+  // available on CI runners. Also, npm → npm.cmd breaks under bash on Windows.
+  let dir = path.dirname(nodeBinary); // bin/
+  let npmPackageDir = null;
+  for (let i = 0; i < 5 && !npmPackageDir; i++) {
+    dir = path.dirname(dir);
+    const candidate = path.join(dir, "node_modules", "npm");
+    if (existsSync(path.join(candidate, "bin", "npm-cli.js"))) {
+      npmPackageDir = candidate;
+    }
+  }
+  if (!npmPackageDir) {
+    // Last resort: npm root -g (works locally on macOS/Linux)
     try {
       npmPackageDir = path.join(capture("npm", ["root", "-g"], { cwd: repoRoot }), "npm");
     } catch {
