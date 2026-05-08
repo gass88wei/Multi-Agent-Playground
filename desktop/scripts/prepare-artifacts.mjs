@@ -50,8 +50,22 @@ function resolveBackendPython() {
   const candidates = [
     path.join(backendDir, ".venv", "bin", "python"),
     path.join(backendDir, ".venv", "Scripts", "python.exe"),
+    // Fallback to system python on CI / non-venv setups
+    "python3",
+    "python",
   ];
-  return candidates.find((candidate) => existsSync(candidate)) || null;
+  return candidates.find((candidate) => {
+    if (!path.isAbsolute(candidate)) {
+      // Check if command is available via spawn
+      const test = spawnSync(
+        process.platform === "win32" ? "where" : "which",
+        [candidate],
+        { stdio: "ignore" },
+      );
+      return test.status === 0;
+    }
+    return existsSync(candidate);
+  }) || null;
 }
 
 function removeAndRecreate(dirPath) {
