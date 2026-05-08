@@ -42,10 +42,12 @@ jobs:
           python -m PyInstaller desktop_entry.py --name agent-playground-backend --noconfirm --clean --onedir "--distpath" ..\desktop\.artifacts\backend
 
       - name: Prepare artifacts (runtime only)
+        shell: bash
         run: |
           cd desktop
           npm ci
           npm install -g npm
+          export NPM_GLOBAL_ROOT="$(npm root -g)"
           node scripts/prepare-artifacts.mjs
 
       - name: Build Electron app

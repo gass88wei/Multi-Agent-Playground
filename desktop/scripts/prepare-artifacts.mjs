@@ -81,7 +81,12 @@ function resolveBundledNodeRuntime() {
     throw new Error(`Node executable not found: ${nodeBinary}`);
   }
 
-  const npmGlobalRoot = capture("npm", ["root", "-g"], { cwd: repoRoot });
+  // Prefer NPM_GLOBAL_ROOT from env (set by CI workflow via `npm root -g`),
+  // falling back to calling `npm root -g` directly.
+  let npmGlobalRoot = process.env.NPM_GLOBAL_ROOT || "";
+  if (!npmGlobalRoot) {
+    npmGlobalRoot = capture("npm", ["root", "-g"], { cwd: repoRoot });
+  }
   const npmPackageDir = path.join(npmGlobalRoot, "npm");
   const npmCliPath = path.join(npmPackageDir, "bin", "npm-cli.js");
   if (!existsSync(npmPackageDir) || !existsSync(npmCliPath)) {
