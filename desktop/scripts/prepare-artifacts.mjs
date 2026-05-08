@@ -272,48 +272,50 @@ function buildBackendArtifacts() {
   mkdirSync(buildDir, { recursive: true });
   mkdirSync(pyinstallerConfigDir, { recursive: true });
 
-  run(
-    pythonBin,
-    [
-      "-m",
-      "PyInstaller",
-      path.join(backendDir, "desktop_entry.py"),
-      "--name",
-      "agent-playground-backend",
-      "--noconfirm",
-      "--clean",
-      "--onedir",
-      "--paths",
-      backendDir,
-      "--distpath",
-      backendArtifactsDir,
-      "--workpath",
-      buildDir,
-      "--specpath",
-      specDir,
-      "--hidden-import",
-      "uvicorn.logging",
-      "--hidden-import",
-      "uvicorn.loops.auto",
-      "--hidden-import",
-      "uvicorn.protocols.http.auto",
-      "--hidden-import",
-      "uvicorn.protocols.websockets.auto",
-      "--hidden-import",
-      "uvicorn.lifespan.on",
-      "--add-data",
-      `${path.join(backendDir, "skills")}${addDataSeparator}backend/skills`,
-      "--add-data",
-      `${path.join(backendDir, "data")}${addDataSeparator}backend/data`,
-    ],
-    {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PYINSTALLER_CONFIG_DIR: pyinstallerConfigDir,
-      },
+  const pyinstallerArgs = [
+    "-m",
+    "PyInstaller",
+    path.join(backendDir, "desktop_entry.py"),
+    "--name",
+    "agent-playground-backend",
+    "--noconfirm",
+    "--clean",
+    "--onedir",
+    "--paths",
+    backendDir,
+    "--distpath",
+    backendArtifactsDir,
+    "--workpath",
+    buildDir,
+    "--specpath",
+    specDir,
+    "--hidden-import",
+    "uvicorn.logging",
+    "--hidden-import",
+    "uvicorn.loops.auto",
+    "--hidden-import",
+    "uvicorn.protocols.http.auto",
+    "--hidden-import",
+    "uvicorn.protocols.websockets.auto",
+    "--hidden-import",
+    "uvicorn.lifespan.on",
+  ];
+
+  // Only add data dirs that exist (e.g. skills/ may not exist on CI)
+  if (existsSync(path.join(backendDir, "skills"))) {
+    pyinstallerArgs.push("--add-data", `${path.join(backendDir, "skills")}${addDataSeparator}backend/skills`);
+  }
+  if (existsSync(path.join(backendDir, "data"))) {
+    pyinstallerArgs.push("--add-data", `${path.join(backendDir, "data")}${addDataSeparator}backend/data`);
+  }
+
+  run(pythonBin, pyinstallerArgs, {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PYINSTALLER_CONFIG_DIR: pyinstallerConfigDir,
     },
-  );
+  });
 }
 
 removeAndRecreate(artifactsDir);
