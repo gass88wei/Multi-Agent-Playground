@@ -156,14 +156,14 @@ class LLMGateway:
 
     def refresh_client(self) -> None:
         self.api_configured = bool(settings.OPENAI_API_KEY)
-        self.client = (
-            OpenAI(
+        if self.api_configured:
+            self.client = OpenAI(
                 api_key=settings.OPENAI_API_KEY,
                 base_url=settings.OPENAI_BASE_URL,
+                default_query={"thinking": {"type": "disabled"}},
             )
-            if self.api_configured
-            else None
-        )
+        else:
+            self.client = None
 
     def route(self, user_input: str, agents: Iterable[AgentDefinition]) -> tuple[str, str]:
         agent_list = list(agents)
